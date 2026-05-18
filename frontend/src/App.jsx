@@ -15,7 +15,7 @@ const App=()=> {
           <Route path="/:roomId" element={<RoomPage/>}/>
         
         </Routes>
-        <Forms/>
+      
           </div>
     
   )
