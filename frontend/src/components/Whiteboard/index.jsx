@@ -1,6 +1,8 @@
-import { useEffect,useState,useLayoutEffect } from "react";
-import rough from "roughjs"
-const roughGenerator=rough.generator();
+import { useEffect, useState, useLayoutEffect } from "react";
+import rough from "roughjs";
+
+const roughGenerator = rough.generator();
+
 const WhiteBoard = ({
   canvasRef,
   ctxRef,
@@ -8,78 +10,154 @@ const WhiteBoard = ({
   setElements,
   tool
 }) => {
-  const[isDrawing,setIsDrawing]=useState(false);
-  useEffect(()=>{
-    const canvas=canvasRef.current;
-    const ctx=canvas.getContext("2d");
-    ctxRef.current=ctx;
-  },[]);
+  const [isDrawing, setIsDrawing] = useState(false);
 
-  useLayoutEffect(()=>{
-    const roughCanvas=rough.canvas(canvasRef.current);
-    elements.forEach((element)=>{
-      roughCanvas.linearPath(element.path);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    canvas.height = window.innerHeight * 2;
+    canvas.width = window.innerWidth * 2;
+    const ctx = canvas.getContext("2d");
 
-    })
-  },[elements])
+    ctxRef.current = ctx;
+  }, []);
 
-  const handleMouseDown=(e)=>{
-    const{offsetX,offsetY}=e.nativeEvent;
-
-    setElements((prevElements)=>[
-      ...prevElements,
-      {
-        type:"pencil",
-        offsetX,
-        offsetY,
-        path:[[offsetX,offsetY]],
-        stroke:"black",
-      },
-    ])
-
-    
-    setIsDrawing(true);
-  }
-
-
-  const handleMouseMove=(e)=>{
-    const{offsetX,offsetY}=e.nativeEvent;
-    
-    if(isDrawing){
-      const {path}=elements[elements.length-1];
-      const newPath=[...path,[offsetX,offsetY]];
-
-      setElements((prevElements)=>
-        prevElements.map((ele,index)=>{
-          if(index===elements.length-1){
-            return{
-              ...ele,
-              path:newPath,
-            } 
-          } else{
-            return ele;
-          }
-        })
-      )
+  useLayoutEffect(() => {
+    const roughCanvas = rough.canvas(canvasRef.current);
+    if (elements.length > 0) {
+      ctxRef.current.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
     }
-    
-    
-  }
+    elements.forEach((element) => {
+      if (element.type === "pencil") {
+        roughCanvas.linearPath(element.path);
+      } else if (element.type === "line") {
+        roughCanvas.draw(
+          roughGenerator.line(
+            element.offsetX,
+            element.offsetY,
+            element.width,
+            element.height
+          )
+        );
+      } else if (element.type==="rect"){
+        roughCanvas.draw(
+          roughGenerator.rectangle(
+            element.offsetX,
+            element.offsetY,
+            element.width,
+            element.height
+          )
+        )
+      }
+    });
+  }, [elements]);
 
-  const handleMouseUp=(e)=>{
+  const handleMouseDown = (e) => {
+    const { offsetX, offsetY } = e.nativeEvent;
+
+    if (tool === "pencil") {
+      setElements((prevElements) => [
+        ...prevElements,
+        {
+          type: "pencil",
+          offsetX,
+          offsetY,
+          path: [[offsetX, offsetY]],
+          stroke: "black",
+        },
+      ]);
+    } else if (tool === "line") {
+      setElements((prevElements) => [
+        ...prevElements,
+        {
+          type: "line",
+          offsetX,
+          offsetY,
+          width: offsetX,
+          height: offsetY,
+          stroke: "black",
+        },
+      ]);
+    } else if(tool==="rect") {
+      setElements((prevElements)=>[
+        ...prevElements,
+        {
+          type:"rect",
+          offsetX,
+          offsetY,
+          width:0,
+          height:0,
+          stroke:"black",
+        }
+      ])
+    }
+
+    setIsDrawing(true);
+  };
+
+  const handleMouseMove = (e) => {
+    const { offsetX, offsetY } = e.nativeEvent;
+
+    if (isDrawing) {
+      if (tool === "pencil") {
+        setElements((prevElements) =>
+          prevElements.map((ele, index) => {
+            if (index === prevElements.length - 1) {
+              return {
+                ...ele,
+                path: [...ele.path, [offsetX, offsetY]],
+              };
+            } else {
+              return ele;
+            }
+          })
+        );
+      } else if (tool === "line") {
+        setElements((prevElements) =>
+          prevElements.map((ele, index) => {
+            if (index === elements.length - 1) {
+              return {
+                ...ele,
+                width: offsetX,
+                height: offsetY,
+              };
+            } else {
+              return ele;
+            }
+          })
+        );
+      } else if(tool==="rect"){
+        setElements((prevElements) =>
+          prevElements.map((ele, index) => {
+            if (index === elements.length - 1) {
+              return {
+                ...ele,
+                width: offsetX-ele.offsetX,
+                height: offsetY-ele.offsetY,
+              };
+            } else {
+              return ele;
+            }
+          })
+        );
+
+      }
+    }
+  };
+
+  const handleMouseUp = (e) => {
     setIsDrawing(false);
-    
-  }
+  };
 
   return (
-    <>
-    
-  <canvas ref={canvasRef}
-  onMouseDown={handleMouseDown}
-  onMouseMove={handleMouseMove}
-  onMouseUp={handleMouseUp}
-  className="border border-dark border-3 h-100 w-100"></canvas>;
-</>
-)}
+    <div
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      className="border border-dark border-3 h-100 w-100 overflow-hidden"
+    >
+      <canvas ref={canvasRef} />
+    </div>
+  );
+};
 
 export default WhiteBoard;
