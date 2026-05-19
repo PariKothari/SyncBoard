@@ -9,6 +9,15 @@ const RoomPage = () => {
   const [color, setColor] = useState("#000000");
   // 1. Added the missing elements state here
   const [elements, setElements] = useState([]);
+  const handleClearCanvas=()=>{
+    const canvas=canvasRef.current;
+    const ctx=canvas.getContext("2d");
+    ctx.fillRect="white";
+    ctxRef.current.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+
+
+    setElements([]);
+  }
 
   return (
     // container-fluid spans the full width, vh-100 locks the height to the viewport, overflow-hidden stops scrolling
@@ -85,7 +94,7 @@ const RoomPage = () => {
 
         {/* Management Action */}
         <div className="col-md-2 d-flex justify-content-end">
-          <button className="btn btn-danger w-100">Clear Canvas</button>
+          <button className="btn btn-danger w-100" onClick={handleClearCanvas} >Clear Canvas</button>
         </div>
       </div>
 
@@ -97,6 +106,7 @@ const RoomPage = () => {
           canvasRef={canvasRef} 
           ctxRef={ctxRef} 
           elements={elements} 
+          color={color}
           setElements={setElements} 
           tool={tool}
         />
