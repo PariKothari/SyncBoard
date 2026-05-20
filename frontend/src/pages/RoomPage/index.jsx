@@ -9,6 +9,7 @@ const RoomPage = () => {
   const [color, setColor] = useState("#000000");
   // 1. Added the missing elements state here
   const [elements, setElements] = useState([]);
+  const [history,setHistory]=useState([]);
   const handleClearCanvas=()=>{
     const canvas=canvasRef.current;
     const ctx=canvas.getContext("2d");
@@ -17,6 +18,20 @@ const RoomPage = () => {
 
 
     setElements([]);
+  }
+
+  const undo=()=>{
+    setHistory((prevHistory)=>[...prevHistory,elements[elements.length-1]]);
+    setElements(
+      (prevElements)=>prevElements.slice(0,prevElements.length-1)
+    )
+  }
+  const redo=()=>{
+     setElements((prevElements)=>[...prevElements,history[history.length-1]]);
+    setHistory(
+      (prevHistory)=>prevHistory.slice(0,prevHistory.length-1)
+    )
+
   }
 
   return (
@@ -88,8 +103,8 @@ const RoomPage = () => {
 
         {/* Undo/Redo Controls */}
         <div className="col-md-3 d-flex gap-2 justify-content-center">
-          <button className="btn btn-primary w-100">Undo</button>
-          <button className="btn btn-outline-primary w-100">Redo</button>
+          <button className="btn btn-primary w-100" disabled={elements.length===0} onClick={()=>undo()}>Undo</button>
+          <button className="btn btn-outline-primary w-100" disabled={history.length<1} onClick={()=>redo()}>Redo</button>
         </div>
 
         {/* Management Action */}
