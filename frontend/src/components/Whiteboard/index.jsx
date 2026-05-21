@@ -1,14 +1,12 @@
 // frontend/src/components/Whiteboard/index.jsx
-import { useEffect, useState, useLayoutEffect, useRef } from "react";
+import { useEffect, useState, useLayoutEffect, useRef, useCallback } from "react";
 import rough from "roughjs";
 import "./index.css";
 
 const roughGenerator = rough.generator();
 
-// ── Utility: generate a simple unique ID ─────────────────────────────────────
 const genId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
-// ── Draw a single arrowhead at (x2,y2) pointing from (x1,y1) ────────────────
 const drawArrowhead = (ctx, x1, y1, x2, y2, color) => {
   const headLen = 18;
   const angle = Math.atan2(y2 - y1, x2 - x1);
@@ -35,17 +33,19 @@ const WhiteBoard = ({
   socket,
   user,
   isPresentation,
+  isHost,
 }) => {
   const [isDrawing, setIsDrawing] = useState(false);
-
-  // Text tool state
-  const [textInput, setTextInput] = useState(null); // { x, y, editingId? }
+  const [textInput, setTextInput] = useState(null);
   const textAreaRef = useRef(null);
-
-  // Element locks: { elementId: { userId, userName } }
   const [locks, setLocks] = useState({});
+  const [lockRejection, setLockRejection] = useState(null);
 
-  // ── Canvas setup ────────────────────────────────────────────────────────────
+  // Throttle ref for live-drag broadcasts
+  const lastBroadcastRef = useRef(0);
+  const THROTTLE_MS = 16;
+
+  // ── Canvas setup ──────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     canvas.height = window.innerHeight * 2;
@@ -61,13 +61,14 @@ const WhiteBoard = ({
     if (ctxRef.current) ctxRef.current.strokeStyle = color;
   }, [color]);
 
-  // ── Socket listeners ────────────────────────────────────────────────────────
+  // ── Socket listeners ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!socket) return;
 
     socket.on("element-lock", ({ elementId, userId, userName }) => {
       setLocks(prev => ({ ...prev, [elementId]: { userId, userName } }));
     });
+
     socket.on("element-unlock", ({ elementId }) => {
       setLocks(prev => {
         const next = { ...prev };
@@ -76,20 +77,25 @@ const WhiteBoard = ({
       });
     });
 
+    socket.on("element-lock-rejected", ({ elementId, lockedBy }) => {
+      setLockRejection({ elementId, lockedBy });
+      setTimeout(() => setLockRejection(null), 2500);
+    });
+
     return () => {
       socket.off("element-lock");
       socket.off("element-unlock");
+      socket.off("element-lock-rejected");
     };
   }, [socket]);
 
-  // Auto-focus textarea when it appears
   useEffect(() => {
     if (textInput && textAreaRef.current) {
       textAreaRef.current.focus();
     }
   }, [textInput]);
 
-  // ── Render canvas ───────────────────────────────────────────────────────────
+  // ── Render canvas ─────────────────────────────────────────────────────────
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
     const ctx = ctxRef.current;
@@ -99,7 +105,7 @@ const WhiteBoard = ({
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     elements.forEach((element) => {
-      const isLocked = locks[element.id] && locks[element.id].userId !== user?.userId;
+      const isLockedByOther = locks[element.id] && locks[element.id].userId !== user?.userId;
 
       if (element.type === "pencil") {
         roughCanvas.linearPath(element.path, {
@@ -118,13 +124,12 @@ const WhiteBoard = ({
       } else if (element.type === "rect") {
         roughCanvas.draw(
           roughGenerator.rectangle(element.offsetX, element.offsetY, element.width, element.height, {
-            stroke: element.stroke,
-            strokeWidth: 5,
+            stroke: isLockedByOther ? "#e74c3c" : element.stroke,
+            strokeWidth: isLockedByOther ? 3 : 5,
             roughness: 0,
           })
         );
       } else if (element.type === "arrow") {
-        // Draw the shaft as a rough line
         roughCanvas.draw(
           roughGenerator.line(element.offsetX, element.offsetY, element.x2, element.y2, {
             stroke: element.stroke,
@@ -132,20 +137,17 @@ const WhiteBoard = ({
             roughness: 0,
           })
         );
-        // Draw the arrowhead manually
         drawArrowhead(ctx, element.offsetX, element.offsetY, element.x2, element.y2, element.stroke);
       } else if (element.type === "text") {
-        // Only render committed text here (the live textarea handles the in-progress edit)
         if (!textInput || textInput.editingId !== element.id) {
           ctx.save();
           ctx.font = "18px sans-serif";
-          ctx.fillStyle = isLocked ? "#888" : element.stroke;
+          ctx.fillStyle = isLockedByOther ? "#888" : element.stroke;
           const lines = element.text.split("\n");
           lines.forEach((line, i) => {
             ctx.fillText(line, element.offsetX, element.offsetY + i * 22);
           });
-          // Lock badge
-          if (isLocked) {
+          if (isLockedByOther) {
             ctx.font = "12px sans-serif";
             ctx.fillStyle = "#e74c3c";
             ctx.fillText(
@@ -160,17 +162,29 @@ const WhiteBoard = ({
     });
   }, [elements, locks, textInput]);
 
-  // ── Broadcast helper ─────────────────────────────────────────────────────────
-  const broadcastElements = (updatedElements) => {
+  // ── Broadcast helpers ─────────────────────────────────────────────────────
+  const broadcastElements = useCallback((updatedElements) => {
     if (socket && user) {
       socket.emit("elementUpdated", { roomId: user.roomId, elements: updatedElements });
     }
-  };
+  }, [socket, user]);
 
-  // ── Mouse handlers ───────────────────────────────────────────────────────────
+  const broadcastLive = useCallback((updatedElements) => {
+    const now = Date.now();
+    if (now - lastBroadcastRef.current < THROTTLE_MS) return;
+    lastBroadcastRef.current = now;
+    if (socket && user) {
+      socket.emit("elementUpdated", { roomId: user.roomId, elements: updatedElements });
+    }
+  }, [socket, user]);
+
+  // Only attendees are blocked during presentation mode; host can always draw
+  const isBlocked = isPresentation && !isHost;
+
+  // ── Mouse handlers ────────────────────────────────────────────────────────
   const handleMouseDown = (e) => {
-    if (isPresentation) return;
-    if (tool === "text") return; // text tool handled via onClick
+    if (isBlocked) return;
+    if (tool === "text") return;
     const { offsetX, offsetY } = e.nativeEvent;
 
     if (tool === "pencil") {
@@ -203,59 +217,78 @@ const WhiteBoard = ({
   };
 
   const handleMouseMove = (e) => {
-    if (!isDrawing || isPresentation) return;
+    if (!isDrawing || isBlocked) return;
     const { offsetX, offsetY } = e.nativeEvent;
+    let updatedElements = null;
 
     if (tool === "pencil") {
-      setElements(prev => prev.map((el, i) =>
-        i === prev.length - 1
-          ? { ...el, path: [...el.path, [offsetX, offsetY]] }
-          : el
-      ));
+      setElements(prev => {
+        const next = prev.map((el, i) =>
+          i === prev.length - 1
+            ? { ...el, path: [...el.path, [offsetX, offsetY]] }
+            : el
+        );
+        updatedElements = next;
+        return next;
+      });
     } else if (tool === "line") {
-      setElements(prev => prev.map((el, i) =>
-        i === prev.length - 1
-          ? { ...el, width: offsetX, height: offsetY }
-          : el
-      ));
+      setElements(prev => {
+        const next = prev.map((el, i) =>
+          i === prev.length - 1
+            ? { ...el, width: offsetX, height: offsetY }
+            : el
+        );
+        updatedElements = next;
+        return next;
+      });
     } else if (tool === "rect") {
-      setElements(prev => prev.map((el, i) =>
-        i === prev.length - 1
-          ? { ...el, width: offsetX - el.offsetX, height: offsetY - el.offsetY }
-          : el
-      ));
+      setElements(prev => {
+        const next = prev.map((el, i) =>
+          i === prev.length - 1
+            ? { ...el, width: offsetX - el.offsetX, height: offsetY - el.offsetY }
+            : el
+        );
+        updatedElements = next;
+        return next;
+      });
     } else if (tool === "arrow") {
-      setElements(prev => prev.map((el, i) =>
-        i === prev.length - 1
-          ? { ...el, x2: offsetX, y2: offsetY }
-          : el
-      ));
+      setElements(prev => {
+        const next = prev.map((el, i) =>
+          i === prev.length - 1
+            ? { ...el, x2: offsetX, y2: offsetY }
+            : el
+        );
+        updatedElements = next;
+        return next;
+      });
+    }
+
+    // Throttled live broadcast so other users see the shape stretching in real-time
+    if (updatedElements) {
+      broadcastLive(updatedElements);
     }
   };
 
-  const handleMouseUp = (e) => {
+  const handleMouseUp = () => {
     setIsDrawing(false);
-    if (isPresentation) return;
-    // Broadcast the final state on mouse up (not on every move)
+    if (isBlocked) return;
+    // Final authoritative broadcast, no throttle
     setElements(prev => {
       broadcastElements(prev);
       return prev;
     });
   };
 
-  // ── Text tool: click to place new textarea ────────────────────────────────
+  // ── Text tool handlers ────────────────────────────────────────────────────
   const handleCanvasClick = (e) => {
-    if (isPresentation || tool !== "text") return;
+    if (isBlocked || tool !== "text") return;
     const { offsetX, offsetY } = e.nativeEvent;
-    // Don't open a new one if we just double-clicked (let dblclick handler run first)
     setTextInput({ x: offsetX, y: offsetY, value: "", editingId: null });
   };
 
-  // ── Text tool: double-click to re-edit existing text element ─────────────
   const handleCanvasDoubleClick = (e) => {
-    if (isPresentation) return;
+    if (isBlocked) return;
     const { offsetX, offsetY } = e.nativeEvent;
-    // Find the closest text element
     const hit = elements.find(el => {
       if (el.type !== "text") return false;
       return (
@@ -266,9 +299,11 @@ const WhiteBoard = ({
       );
     });
     if (hit) {
-      // Check if locked by someone else
-      if (locks[hit.id] && locks[hit.id].userId !== user?.userId) return;
-      // Emit lock
+      if (locks[hit.id] && locks[hit.id].userId !== user?.userId) {
+        setLockRejection({ elementId: hit.id, lockedBy: locks[hit.id].userName });
+        setTimeout(() => setLockRejection(null), 2500);
+        return;
+      }
       if (socket && user) {
         socket.emit("element-lock", {
           roomId: user.roomId,
@@ -281,14 +316,12 @@ const WhiteBoard = ({
     }
   };
 
-  // ── Text tool: commit text on blur ────────────────────────────────────────
   const handleTextBlur = () => {
     if (!textInput) return;
     const text = textAreaRef.current?.value || "";
 
     if (text.trim()) {
       if (textInput.editingId) {
-        // Update existing element
         setElements(prev => {
           const updated = prev.map(el =>
             el.id === textInput.editingId ? { ...el, text } : el
@@ -299,12 +332,10 @@ const WhiteBoard = ({
           }
           return updated;
         });
-        // Unlock
         if (socket && user) {
           socket.emit("element-unlock", { roomId: user.roomId, elementId: textInput.editingId });
         }
       } else {
-        // New text element
         const newEl = {
           id: genId(),
           userId: user?.userId,
@@ -323,7 +354,6 @@ const WhiteBoard = ({
         });
       }
     } else if (textInput.editingId) {
-      // Blur with empty text — just unlock
       if (socket && user) {
         socket.emit("element-unlock", { roomId: user.roomId, elementId: textInput.editingId });
       }
@@ -332,7 +362,6 @@ const WhiteBoard = ({
     setTextInput(null);
   };
 
-  // ── Get canvas bounding rect for textarea absolute positioning ────────────
   const canvasContainerRef = useRef(null);
 
   return (
@@ -344,9 +373,37 @@ const WhiteBoard = ({
       onClick={handleCanvasClick}
       onDoubleClick={handleCanvasDoubleClick}
       className="border border-dark border-3 h-100 w-100 overflow-hidden position-relative"
-      style={{ cursor: isPresentation ? "default" : tool === "text" ? "text" : "crosshair" }}
+      style={{
+        cursor: isBlocked ? "not-allowed" : tool === "text" ? "text" : "crosshair",
+      }}
     >
       <canvas ref={canvasRef} />
+
+      {/* Lock rejection toast */}
+      {lockRejection && (
+        <div
+          style={{
+            position: "absolute",
+            top: 12,
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "#e74c3c",
+            color: "#fff",
+            padding: "6px 14px",
+            borderRadius: 6,
+            fontSize: 13,
+            fontWeight: 600,
+            zIndex: 30,
+            pointerEvents: "none",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          🔒 Locked by {lockRejection.lockedBy}
+        </div>
+      )}
 
       {/* Floating textarea for text tool */}
       {textInput && (
@@ -373,6 +430,27 @@ const WhiteBoard = ({
             boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
           }}
         />
+      )}
+
+      {/* View-only notice for attendees in presentation mode */}
+      {isPresentation && !isHost && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: 12,
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "rgba(0,0,0,0.55)",
+            color: "#fff",
+            padding: "5px 14px",
+            borderRadius: 20,
+            fontSize: 12,
+            pointerEvents: "none",
+            zIndex: 20,
+          }}
+        >
+          🎥 View only — presentation in progress
+        </div>
       )}
     </div>
   );

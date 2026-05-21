@@ -10,8 +10,9 @@ const io = new Server(server, {
 
 // Per-room state
 const roomElements = {}; // roomId -> elements[]
-const roomLocks = {};    // roomId -> { elementId: { userId, userName } }
-const roomModes = {};    // roomId -> "COLLABORATION" | "PRESENTATION"
+const roomLocks   = {}; // roomId -> { elementId: { userId, userName } }
+const roomModes   = {}; // roomId -> "COLLABORATION" | "PRESENTATION"
+const roomHosts   = {}; // roomId -> userId
 
 app.get("/", (req, res) => {
   res.send("this is realtime whiteboard sharing app");
@@ -19,32 +20,39 @@ app.get("/", (req, res) => {
 
 io.on("connection", (socket) => {
 
-  // ── Existing handler (untouched) ──────────────────────────────────────────
+  // ── User joins room ───────────────────────────────────────────────────────
   socket.on("userJoined", (data) => {
-    const { Name, userId, roomId, host, presenter } = data;
+    const { name, userId, roomId, host } = data;
     socket.join(roomId);
+    if (host && !roomHosts[roomId]) {
+      roomHosts[roomId] = userId;
+    }
     socket.emit("userIsJoined", { success: true });
 
-    // Send current canvas state to the new joiner
     if (roomElements[roomId]) {
       socket.emit("canvasState", roomElements[roomId]);
     }
-    // Send current room mode
     socket.emit("roomMode", roomModes[roomId] || "COLLABORATION");
+
+    // Replay active locks to the new joiner
+    if (roomLocks[roomId]) {
+      Object.entries(roomLocks[roomId]).forEach(([elementId, lockInfo]) => {
+        socket.emit("element-lock", { elementId, ...lockInfo });
+      });
+    }
   });
 
-  // ── Feature 1 & 3: Broadcast drawing elements ────────────────────────────
+  // ── Drawing elements (live preview + final) ───────────────────────────────
   socket.on("elementUpdated", (data) => {
     const { roomId, elements } = data;
     roomElements[roomId] = elements;
     socket.to(roomId).emit("canvasState", elements);
   });
 
-  // ── Feature 2: Text element saved ────────────────────────────────────────
+  // ── Text element saved ────────────────────────────────────────────────────
   socket.on("textSaved", (data) => {
     const { roomId, element } = data;
     if (!roomElements[roomId]) roomElements[roomId] = [];
-    // Upsert: replace if same id exists, else push
     const idx = roomElements[roomId].findIndex(e => e.id === element.id);
     if (idx !== -1) {
       roomElements[roomId][idx] = element;
@@ -54,29 +62,43 @@ io.on("connection", (socket) => {
     socket.to(roomId).emit("textSaved", element);
   });
 
-  // ── Feature 2: Element locking ────────────────────────────────────────────
+  // ── Element locking — with rejection if already locked ────────────────────
   socket.on("element-lock", (data) => {
     const { roomId, elementId, userId, userName } = data;
     if (!roomLocks[roomId]) roomLocks[roomId] = {};
+
+    const existingLock = roomLocks[roomId][elementId];
+
+    // Reject if locked by a DIFFERENT user
+    if (existingLock && existingLock.userId !== userId) {
+      socket.emit("element-lock-rejected", {
+        elementId,
+        lockedBy: existingLock.userName,
+      });
+      return;
+    }
+
+    // Grant the lock
     roomLocks[roomId][elementId] = { userId, userName };
     socket.to(roomId).emit("element-lock", { elementId, userId, userName });
+    socket.emit("element-lock-granted", { elementId });
   });
 
   socket.on("element-unlock", (data) => {
     const { roomId, elementId } = data;
     if (roomLocks[roomId]) delete roomLocks[roomId][elementId];
-    socket.to(roomId).emit("element-unlock", { elementId });
+    // Broadcast to everyone so all UIs clear the lock badge
+    io.to(roomId).emit("element-unlock", { elementId });
   });
 
-  // ── Feature 4: Presentation mode ─────────────────────────────────────────
+  // ── Presentation mode ─────────────────────────────────────────────────────
   socket.on("roomModeChange", (data) => {
     const { roomId, mode } = data;
     roomModes[roomId] = mode;
-    // Broadcast to everyone in the room INCLUDING the host
     io.to(roomId).emit("roomMode", mode);
   });
 
-  // ── Feature 5: Undo/Redo broadcast ───────────────────────────────────────
+  // ── Undo / Redo ───────────────────────────────────────────────────────────
   socket.on("elementDeleted", (data) => {
     const { roomId, elementId } = data;
     if (roomElements[roomId]) {

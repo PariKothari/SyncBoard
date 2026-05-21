@@ -10,11 +10,7 @@ const RoomPage = ({ socket, user }) => {
   const [tool, setTool] = useState("pencil");
   const [color, setColor] = useState("#000000");
   const [elements, setElements] = useState([]);
-
-  // Per-user undo/redo stacks (Feature 5)
-  const [myUndoStack, setMyUndoStack] = useState([]); // deleted elements I can redo
-
-  // Presentation mode (Feature 4)
+  const [myUndoStack, setMyUndoStack] = useState([]);
   const [roomMode, setRoomMode] = useState("COLLABORATION");
 
   const isPresentation = roomMode === "PRESENTATION";
@@ -71,18 +67,15 @@ const RoomPage = ({ socket, user }) => {
     }
   };
 
-  // ── Feature 5: Per-user Undo (Ctrl+Z) ────────────────────────────────────
+  // ── Undo (Ctrl+Z) ─────────────────────────────────────────────────────────
   const handleUndo = useCallback(() => {
     if (!user) return;
     setElements(prev => {
-      // Find last element belonging to this user
       for (let i = prev.length - 1; i >= 0; i--) {
         if (prev[i].userId === user.userId) {
           const removed = prev[i];
           const updated = prev.filter((_, idx) => idx !== i);
-          // Push to redo stack
           setMyUndoStack(s => [...s, removed]);
-          // Broadcast deletion
           if (socket) {
             socket.emit("elementDeleted", { roomId: user.roomId, elementId: removed.id });
           }
@@ -93,7 +86,7 @@ const RoomPage = ({ socket, user }) => {
     });
   }, [user, socket]);
 
-  // ── Feature 5: Per-user Redo (Ctrl+Y) ────────────────────────────────────
+  // ── Redo (Ctrl+Y) ─────────────────────────────────────────────────────────
   const handleRedo = useCallback(() => {
     if (!user || myUndoStack.length === 0) return;
     const element = myUndoStack[myUndoStack.length - 1];
@@ -104,7 +97,7 @@ const RoomPage = ({ socket, user }) => {
     }
   }, [user, socket, myUndoStack]);
 
-  // ── Keyboard listeners ────────────────────────────────────────────────────
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────
   useEffect(() => {
     const handleKeyDown = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "z") {
@@ -120,7 +113,7 @@ const RoomPage = ({ socket, user }) => {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleUndo, handleRedo]);
 
-  // ── Feature 4: Toggle presentation mode (host only) ──────────────────────
+  // ── Toggle presentation mode (host only) ──────────────────────────────────
   const handleModeToggle = () => {
     if (!socket || !user) return;
     const newMode = roomMode === "COLLABORATION" ? "PRESENTATION" : "COLLABORATION";
@@ -128,6 +121,9 @@ const RoomPage = ({ socket, user }) => {
   };
 
   const myElementCount = elements.filter(e => e.userId === user?.userId).length;
+
+  // Host always sees the toolbar. Attendees only see it in collaboration mode.
+  const showToolbar = isHost || !isPresentation;
 
   return (
     <div className="container-fluid vh-100 d-flex flex-column overflow-hidden bg-light px-4">
@@ -141,11 +137,10 @@ const RoomPage = ({ socket, user }) => {
         )}
       </h2>
 
-      {/* Tool Bar — hidden for attendees in presentation mode */}
-      {!isPresentation && (
+      {/* Toolbar — always shown to host, hidden for attendees in presentation mode */}
+      {showToolbar && (
         <div className="d-flex align-items-center justify-content-between border p-3 rounded shadow-sm bg-white mb-3 flex-wrap gap-2">
 
-          {/* Tool Selection */}
           <div className="d-flex align-items-center gap-3 flex-wrap">
             {["pencil", "line", "rect", "arrow", "text"].map((t) => (
               <div key={t} className="form-check d-flex align-items-center gap-1 mb-0">
@@ -163,7 +158,6 @@ const RoomPage = ({ socket, user }) => {
             ))}
           </div>
 
-          {/* Color Picker */}
           <div className="d-flex align-items-center">
             <label htmlFor="color" className="fw-bold m-0">Color:</label>
             <input
@@ -175,7 +169,6 @@ const RoomPage = ({ socket, user }) => {
             />
           </div>
 
-          {/* Undo / Redo */}
           <div className="d-flex gap-2">
             <button
               className="btn btn-primary"
@@ -195,11 +188,10 @@ const RoomPage = ({ socket, user }) => {
             </button>
           </div>
 
-          {/* Clear + Presentation toggle */}
           <div className="d-flex gap-2 align-items-center">
             <button className="btn btn-danger" onClick={handleClearCanvas}>Clear</button>
 
-            {/* Feature 4: Only the host sees this toggle */}
+            {/* Host always sees this toggle — even in presentation mode */}
             {isHost && (
               <div className="d-flex align-items-center gap-2 ms-2 border rounded px-3 py-1 bg-light">
                 <span className="fw-semibold small">
@@ -236,6 +228,7 @@ const RoomPage = ({ socket, user }) => {
           socket={socket}
           user={user}
           isPresentation={isPresentation}
+          isHost={isHost}
         />
       </div>
 
