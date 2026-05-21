@@ -37,3 +37,6 @@ build/
 *.njsproj
 *.sln
 *.sw?
+
+
+repomix-output.xml
