@@ -13,6 +13,7 @@ const roomElements = {}; // roomId -> elements[]
 const roomLocks   = {}; // roomId -> { elementId: { userId, userName } }
 const roomModes   = {}; // roomId -> "COLLABORATION" | "PRESENTATION"
 const roomHosts   = {}; // roomId -> userId
+const roomUsers   = {}; // roomId -> { [userId]: { userId, name } }
 
 app.get("/", (req, res) => {
   res.send("this is realtime whiteboard sharing app");
@@ -24,15 +25,27 @@ io.on("connection", (socket) => {
   socket.on("userJoined", (data) => {
     const { name, userId, roomId, host } = data;
     socket.join(roomId);
+    socket.data.roomId = roomId;
+    socket.data.userId = userId;
+    socket.data.name = name;
+
     if (host && !roomHosts[roomId]) {
       roomHosts[roomId] = userId;
     }
+    if (!roomUsers[roomId]) roomUsers[roomId] = {};
+    roomUsers[roomId][userId] = { userId, name };
+
     socket.emit("userIsJoined", { success: true });
 
     if (roomElements[roomId]) {
       socket.emit("canvasState", roomElements[roomId]);
     }
     socket.emit("roomMode", roomModes[roomId] || "COLLABORATION");
+
+    const roster = Object.values(roomUsers[roomId]);
+    socket.emit("allUsers", roster);
+    socket.to(roomId).emit("userJoined", { userId, name });
+    socket.to(roomId).emit("allUsers", roster);
 
     // Replay active locks to the new joiner
     if (roomLocks[roomId]) {
@@ -42,10 +55,33 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("disconnect", () => {
+    const { roomId, userId, name } = socket.data;
+    if (!roomId || !userId) return;
+    if (roomUsers[roomId]) {
+      delete roomUsers[roomId][userId];
+      const roster = Object.values(roomUsers[roomId]);
+      io.to(roomId).emit("userLeft", { userId, name });
+      io.to(roomId).emit("allUsers", roster);
+    }
+  });
+
+  // ── Clear canvas (instant broadcast to entire room) ─────────────────────
+  socket.on("clearCanvas", (data) => {
+    const { roomId } = data;
+    roomElements[roomId] = [];
+    if (roomLocks[roomId]) roomLocks[roomId] = {};
+    io.to(roomId).emit("canvasCleared");
+    io.to(roomId).emit("canvasState", []);
+  });
+
   // ── Drawing elements (live preview + final) ───────────────────────────────
   socket.on("elementUpdated", (data) => {
     const { roomId, elements } = data;
     roomElements[roomId] = elements;
+    if (Array.isArray(elements) && elements.length === 0) {
+      io.to(roomId).emit("canvasCleared");
+    }
     socket.to(roomId).emit("canvasState", elements);
   });
 

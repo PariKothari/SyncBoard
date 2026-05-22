@@ -12,21 +12,43 @@ const RoomPage = ({ socket, user }) => {
   const [elements, setElements] = useState([]);
   const [myUndoStack, setMyUndoStack] = useState([]);
   const [roomMode, setRoomMode] = useState("COLLABORATION");
+  const [canvasClearVersion, setCanvasClearVersion] = useState(0);
 
   const isPresentation = roomMode === "PRESENTATION";
   const isHost = user?.host === true;
 
-  // ── Socket listeners ──────────────────────────────────────────────────────
+  const forceCanvasRedraw = useCallback(() => {
+    const canvas = canvasRef.current;
+    const ctx = ctxRef.current;
+    if (canvas && ctx) {
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+    setCanvasClearVersion((v) => v + 1);
+  }, []);
+
+  const applyCanvasClear = useCallback(() => {
+    setElements([]);
+    setMyUndoStack([]);
+    forceCanvasRedraw();
+  }, [forceCanvasRedraw]);
+
   useEffect(() => {
-    if (!socket) return;
+    if (!socket || !user?.roomId || !user?.userId || !user?.name) return;
 
-    socket.on("canvasState", (incomingElements) => {
-      setElements(incomingElements);
-    });
+    const onCanvasState = (incomingElements) => {
+      const next = Array.isArray(incomingElements) ? incomingElements : [];
+      setElements(next);
+      if (next.length === 0) forceCanvasRedraw();
+    };
 
-    socket.on("textSaved", (element) => {
-      setElements(prev => {
-        const idx = prev.findIndex(e => e.id === element.id);
+    const onCanvasCleared = () => applyCanvasClear();
+
+    const onTextSaved = (element) => {
+      setElements((prev) => {
+        const idx = prev.findIndex((e) => e.id === element.id);
         if (idx !== -1) {
           const updated = [...prev];
           updated[idx] = element;
@@ -34,48 +56,65 @@ const RoomPage = ({ socket, user }) => {
         }
         return [...prev, element];
       });
-    });
+    };
 
-    socket.on("elementDeleted", (elementId) => {
-      setElements(prev => prev.filter(e => e.id !== elementId));
-    });
+    const onElementDeleted = (elementId) => {
+      setElements((prev) => prev.filter((e) => e.id !== elementId));
+    };
 
-    socket.on("elementRestored", (element) => {
-      setElements(prev => [...prev, element]);
-    });
+    const onElementRestored = (element) => {
+      setElements((prev) => [...prev, element]);
+    };
 
-    socket.on("roomMode", (mode) => {
-      setRoomMode(mode);
-    });
+    const onRoomMode = (mode) => setRoomMode(mode);
+
+    const emitJoinRoom = () => {
+      socket.emit("joinRoom", {
+        name: user.name,
+        userId: user.userId,
+        roomId: user.roomId,
+        host: user.host ?? false,
+        presenter: user.presenter ?? false,
+      });
+    };
+
+    socket.on("canvasState", onCanvasState);
+    socket.on("canvasCleared", onCanvasCleared);
+    socket.on("textSaved", onTextSaved);
+    socket.on("elementDeleted", onElementDeleted);
+    socket.on("elementRestored", onElementRestored);
+    socket.on("roomMode", onRoomMode);
+
+    if (socket.connected) emitJoinRoom();
+    else socket.on("connect", emitJoinRoom);
 
     return () => {
-      socket.off("canvasState");
-      socket.off("textSaved");
-      socket.off("elementDeleted");
-      socket.off("elementRestored");
-      socket.off("roomMode");
+      socket.off("connect", emitJoinRoom);
+      socket.off("canvasState", onCanvasState);
+      socket.off("canvasCleared", onCanvasCleared);
+      socket.off("textSaved", onTextSaved);
+      socket.off("elementDeleted", onElementDeleted);
+      socket.off("elementRestored", onElementRestored);
+      socket.off("roomMode", onRoomMode);
     };
-  }, [socket]);
+  }, [socket, user, applyCanvasClear, forceCanvasRedraw]);
 
-  // ── Clear canvas ──────────────────────────────────────────────────────────
   const handleClearCanvas = () => {
-    const canvas = canvasRef.current;
-    ctxRef.current.clearRect(0, 0, canvas.width, canvas.height);
-    setElements([]);
+    applyCanvasClear();
     if (socket && user) {
+      socket.emit("clearCanvas", { roomId: user.roomId });
       socket.emit("elementUpdated", { roomId: user.roomId, elements: [] });
     }
   };
 
-  // ── Undo (Ctrl+Z) ─────────────────────────────────────────────────────────
   const handleUndo = useCallback(() => {
     if (!user) return;
-    setElements(prev => {
+    setElements((prev) => {
       for (let i = prev.length - 1; i >= 0; i--) {
         if (prev[i].userId === user.userId) {
           const removed = prev[i];
           const updated = prev.filter((_, idx) => idx !== i);
-          setMyUndoStack(s => [...s, removed]);
+          setMyUndoStack((s) => [...s, removed]);
           if (socket) {
             socket.emit("elementDeleted", { roomId: user.roomId, elementId: removed.id });
           }
@@ -86,18 +125,16 @@ const RoomPage = ({ socket, user }) => {
     });
   }, [user, socket]);
 
-  // ── Redo (Ctrl+Y) ─────────────────────────────────────────────────────────
   const handleRedo = useCallback(() => {
     if (!user || myUndoStack.length === 0) return;
     const element = myUndoStack[myUndoStack.length - 1];
-    setMyUndoStack(s => s.slice(0, -1));
-    setElements(prev => [...prev, element]);
+    setMyUndoStack((s) => s.slice(0, -1));
+    setElements((prev) => [...prev, element]);
     if (socket) {
       socket.emit("elementRestored", { roomId: user.roomId, element });
     }
   }, [user, socket, myUndoStack]);
 
-  // ── Keyboard shortcuts ────────────────────────────────────────────────────
   useEffect(() => {
     const handleKeyDown = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "z") {
@@ -113,22 +150,17 @@ const RoomPage = ({ socket, user }) => {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleUndo, handleRedo]);
 
-  // ── Toggle presentation mode (host only) ──────────────────────────────────
   const handleModeToggle = () => {
     if (!socket || !user) return;
     const newMode = roomMode === "COLLABORATION" ? "PRESENTATION" : "COLLABORATION";
     socket.emit("roomModeChange", { roomId: user.roomId, mode: newMode });
   };
 
-  const myElementCount = elements.filter(e => e.userId === user?.userId).length;
-
-  // Host always sees the toolbar. Attendees only see it in collaboration mode.
+  const myElementCount = elements.filter((e) => e.userId === user?.userId).length;
   const showToolbar = isHost || !isPresentation;
 
   return (
-    <div className="container-fluid vh-100 d-flex flex-column overflow-hidden bg-light px-4">
-
-      {/* Header */}
+    <div className="container-fluid vh-100 d-flex flex-column overflow-hidden bg-light px-4 room-page">
       <h2 className="text-center py-3 my-0 fw-semibold fs-4">
         White Board Sharing App{" "}
         <span className="text-primary fs-5">[Room: {user?.roomId ?? "—"}]</span>
@@ -137,12 +169,10 @@ const RoomPage = ({ socket, user }) => {
         )}
       </h2>
 
-      {/* Toolbar — always shown to host, hidden for attendees in presentation mode */}
       {showToolbar && (
         <div className="d-flex align-items-center justify-content-between border p-3 rounded shadow-sm bg-white mb-3 flex-wrap gap-2">
-
           <div className="d-flex align-items-center gap-3 flex-wrap">
-            {["pencil", "line", "rect", "arrow", "text"].map((t) => (
+            {["pencil", "line", "rect", "circle", "arrow", "text"].map((t) => (
               <div key={t} className="form-check d-flex align-items-center gap-1 mb-0">
                 <input
                   type="radio"
@@ -153,7 +183,9 @@ const RoomPage = ({ socket, user }) => {
                   className="form-check-input m-0"
                   onChange={(e) => setTool(e.target.value)}
                 />
-                <label htmlFor={t} className="form-check-label ms-1 m-0 text-capitalize">{t}</label>
+                <label htmlFor={t} className="form-check-label ms-1 m-0 text-capitalize">
+                  {t}
+                </label>
               </div>
             ))}
           </div>
@@ -189,9 +221,10 @@ const RoomPage = ({ socket, user }) => {
           </div>
 
           <div className="d-flex gap-2 align-items-center">
-            <button className="btn btn-danger" onClick={handleClearCanvas}>Clear</button>
+            <button className="btn btn-danger" onClick={handleClearCanvas}>
+              Clear
+            </button>
 
-            {/* Host always sees this toggle — even in presentation mode */}
             {isHost && (
               <div className="d-flex align-items-center gap-2 ms-2 border rounded px-3 py-1 bg-light">
                 <span className="fw-semibold small">
@@ -216,7 +249,6 @@ const RoomPage = ({ socket, user }) => {
         </div>
       )}
 
-      {/* Canvas area */}
       <div className="flex-grow-1 w-100 mb-4 canvas-box bg-white border rounded shadow-sm overflow-hidden position-relative">
         <WhiteBoard
           canvasRef={canvasRef}
@@ -229,9 +261,9 @@ const RoomPage = ({ socket, user }) => {
           user={user}
           isPresentation={isPresentation}
           isHost={isHost}
+          canvasClearVersion={canvasClearVersion}
         />
       </div>
-
     </div>
   );
 };
