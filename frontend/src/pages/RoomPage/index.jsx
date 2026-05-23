@@ -159,6 +159,34 @@ const RoomPage = ({ socket, user }) => {
   const myElementCount = elements.filter((e) => e.userId === user?.userId).length;
   const showToolbar = isHost || !isPresentation;
 
+  // ── Canvas Export Engine ──────────────────────────────────────────────────
+  const exportCanvas = () => {
+    const canvas = canvasRef.current || document.querySelector("canvas");
+    if (!canvas) return;
+
+    // Create an in-memory scratch canvas of the exact same dimensions
+    const scratchCanvas = document.createElement("canvas");
+    scratchCanvas.width = canvas.width;
+    scratchCanvas.height = canvas.height;
+
+    const scratchCtx = scratchCanvas.getContext("2d");
+    if (!scratchCtx) return;
+
+    // Paint a solid white background over it
+    scratchCtx.fillStyle = "#ffffff";
+    scratchCtx.fillRect(0, 0, scratchCanvas.width, scratchCanvas.height);
+
+    // Copy the original whiteboard drawings cleanly on top of the white background
+    scratchCtx.drawImage(canvas, 0, 0);
+
+    // Trigger the download link using a clean data URL string from the scratch canvas
+    const dataURI = scratchCanvas.toDataURL("image/png");
+    const anchor = document.createElement("a");
+    anchor.href = dataURI;
+    anchor.download = "whiteboard-export.png";
+    anchor.click();
+  };
+
   return (
     <div className="container-fluid vh-100 d-flex flex-column overflow-hidden bg-light px-4 room-page">
       <h2 className="text-center py-3 my-0 fw-semibold fs-4">
@@ -223,6 +251,9 @@ const RoomPage = ({ socket, user }) => {
           <div className="d-flex gap-2 align-items-center">
             <button className="btn btn-danger" onClick={handleClearCanvas}>
               Clear
+            </button>
+            <button onClick={exportCanvas} className="btn btn-export">
+              Export to PNG
             </button>
 
             {isHost && (
