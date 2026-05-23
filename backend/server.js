@@ -1,4 +1,7 @@
 // backend/server.js
+// Initialize dotenv at the absolute top of your application to load environment variables
+require("dotenv").config();
+
 const express = require("express");
 const app = express();
 
@@ -7,6 +10,27 @@ const { Server } = require("socket.io");
 const io = new Server(server, {
   cors: { origin: "*" }
 });
+
+// Import the isolated AI routes
+const aiRoutes = require("./ai");
+
+// Enable JSON parsing middleware
+app.use(express.json());
+
+// Enable CORS for browser HTTP requests from frontend
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// Mount the AI API endpoint under /api/ai
+app.use("/api/ai", aiRoutes);
 
 // Per-room state
 const roomElements = {}; // roomId -> elements[]

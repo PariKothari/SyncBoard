@@ -3,6 +3,23 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import "./index.css";
 import WhiteBoard from "../../components/Whiteboard";
 
+// ── Lightweight Markdown-to-Plain Text Formatter ──────────────────────────
+const formatAiResponse = (text) => {
+  if (!text) return "";
+  return text
+    // Replace markdown bold tags (**text**) with the clean text inside them
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    // Remove markdown header hashes at the beginning of lines (e.g. "### Title" -> "Title")
+    .replace(/^#+\s*(.*?)$/gm, "$1")
+    // Convert bullet point asterisks to clean standard dots (•)
+    .replace(/^\s*\*\s+/gm, "•  ")
+    // Clean up any remaining loose asterisks
+    .replace(/\*/g, "")
+    // Normalize excessive consecutive line breaks to keep spacing neat
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+};
+
 const RoomPage = ({ socket, user }) => {
   const canvasRef = useRef(null);
   const ctxRef = useRef(null);
@@ -13,6 +30,10 @@ const RoomPage = ({ socket, user }) => {
   const [myUndoStack, setMyUndoStack] = useState([]);
   const [roomMode, setRoomMode] = useState("COLLABORATION");
   const [canvasClearVersion, setCanvasClearVersion] = useState(0);
+
+  // SaaS AI Panel States
+  const [aiOutput, setAiOutput] = useState("");
+  const [panelMode, setPanelMode] = useState("");
 
   const isPresentation = roomMode === "PRESENTATION";
   const isHost = user?.host === true;
@@ -156,15 +177,58 @@ const RoomPage = ({ socket, user }) => {
     socket.emit("roomModeChange", { roomId: user.roomId, mode: newMode });
   };
 
+  // ── AI Service Core Handler ───────────────────────────────────────────────
+  const handleAiAction = async (mode) => {
+    const title = mode === "summarize" ? "Board Summary" : "Stack Analysis";
+    setPanelMode(title);
+    setAiOutput("Thinking... Contacting SyncBoard AI Assistant...");
+
+    const textElements = elements
+      .filter((el) => el.type === "text" && el.text && el.text.trim().length > 0)
+      .map((el) => el.text);
+
+    if (textElements.length === 0) {
+      setAiOutput(
+        "❌ No text found on the canvas to analyze!\n\nPlease use the 'Text' tool and double-click the board to write some text content before invoking AI Services."
+      );
+      return;
+    }
+
+    try {
+      const response = await fetch("http://localhost:5000/api/ai/assistant", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          textElements,
+          mode,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok && data.success) {
+        // Formats and cleans the markdown text response before displaying it
+        setAiOutput(formatAiResponse(data.result));
+      } else {
+        setAiOutput(`❌ Error: ${data.error || "Failed to parse AI assistance response."}`);
+      }
+    } catch (err) {
+      console.error("AI service fetch error:", err);
+      setAiOutput(
+        "❌ Server Error: Could not connect to the backend AI API. Please verify that your backend server is running on http://localhost:5000 and that GEMINI_API_KEY is loaded."
+      );
+    }
+  };
+
   const myElementCount = elements.filter((e) => e.userId === user?.userId).length;
   const showToolbar = isHost || !isPresentation;
 
-  // ── Canvas Export Engine ──────────────────────────────────────────────────
   const exportCanvas = () => {
     const canvas = canvasRef.current || document.querySelector("canvas");
     if (!canvas) return;
 
-    // Create an in-memory scratch canvas of the exact same dimensions
     const scratchCanvas = document.createElement("canvas");
     scratchCanvas.width = canvas.width;
     scratchCanvas.height = canvas.height;
@@ -172,14 +236,10 @@ const RoomPage = ({ socket, user }) => {
     const scratchCtx = scratchCanvas.getContext("2d");
     if (!scratchCtx) return;
 
-    // Paint a solid white background over it
     scratchCtx.fillStyle = "#ffffff";
     scratchCtx.fillRect(0, 0, scratchCanvas.width, scratchCanvas.height);
-
-    // Copy the original whiteboard drawings cleanly on top of the white background
     scratchCtx.drawImage(canvas, 0, 0);
 
-    // Trigger the download link using a clean data URL string from the scratch canvas
     const dataURI = scratchCanvas.toDataURL("image/png");
     const anchor = document.createElement("a");
     anchor.href = dataURI;
@@ -188,113 +248,527 @@ const RoomPage = ({ socket, user }) => {
   };
 
   return (
-    <div className="container-fluid vh-100 d-flex flex-column overflow-hidden bg-light px-4 room-page">
-      <h2 className="text-center py-3 my-0 fw-semibold fs-4">
-        White Board Sharing App{" "}
-        <span className="text-primary fs-5">[Room: {user?.roomId ?? "—"}]</span>
-        {isPresentation && (
-          <span className="ms-3 badge bg-danger fs-6">🎥 Presentation Mode</span>
-        )}
-      </h2>
+    <div
+      style={{
+        width: '100vw',
+        height: '100vh',
+        position: 'relative',
+        overflow: 'hidden',
+        backgroundColor: '#f8f9fa',
+        backgroundImage: 'radial-gradient(#e9ecef 1px, transparent 1px)',
+        backgroundSize: '16px 16px',
+        margin: 0,
+        padding: 0
+      }}
+    >
+      {/* Global Scrollbar Reset and Narrow Scrollbar Styles */}
+      <style>{`
+        html, body {
+          overflow: hidden !important;
+          margin: 0 !important;
+          padding: 0 !important;
+        }
+        .hide-scrollbar::-webkit-scrollbar {
+          display: none !important;
+        }
+        .hide-scrollbar {
+          -ms-overflow-style: none !important;
+          scrollbar-width: none !important;
+        }
+        .small-scrollbar::-webkit-scrollbar {
+          width: 5px !important;
+          height: 5px !important;
+        }
+        .small-scrollbar::-webkit-scrollbar-track {
+          background: #f1f3f5 !important;
+          border-radius: 10px !important;
+        }
+        .small-scrollbar::-webkit-scrollbar-thumb {
+          background: #ced4da !important;
+          border-radius: 10px !important;
+        }
+        .small-scrollbar::-webkit-scrollbar-thumb:hover {
+          background: #adb5bd !important;
+        }
+      `}</style>
 
+      {/* Underlying Interactive Canvas */}
+      <WhiteBoard
+        canvasRef={canvasRef}
+        ctxRef={ctxRef}
+        elements={elements}
+        setElements={setElements}
+        color={color}
+        tool={tool}
+        socket={socket}
+        user={user}
+        isPresentation={isPresentation}
+        isHost={isHost}
+        canvasClearVersion={canvasClearVersion}
+      />
+
+      {/* Top Nav Bar */}
+      <div
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          height: '60px',
+          background: '#ffffff',
+          borderBottom: '1px solid #dee2e6',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          padding: '0 20px',
+          zIndex: 1001
+        }}
+      >
+        {/* Left Side: Logo & Room Metadata */}
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <span
+            style={{
+              fontSize: '20px',
+              fontWeight: '800',
+              background: 'linear-gradient(45deg, #1c7ed6, #7048e8)',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+              fontFamily: "'Inter', sans-serif"
+            }}
+          >
+            ✨ SyncBoard
+          </span>
+          <span
+            style={{
+              fontSize: '11px',
+              fontWeight: '600',
+              color: '#868e96',
+              backgroundColor: '#f1f3f5',
+              padding: '4px 10px',
+              borderRadius: '12px',
+              marginLeft: '12px',
+              fontFamily: "'Inter', sans-serif"
+            }}
+          >
+            Room: {user?.roomId ?? "—"}
+          </span>
+        </div>
+
+        {/* Center Container: Unified Mode Selector & Active Presentation Alert */}
+        <div
+          style={{
+            position: 'absolute',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            zIndex: 1002
+          }}
+        >
+          {isHost ? (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                backgroundColor: '#f1f3f5',
+                borderRadius: '20px',
+                padding: '3px',
+                border: '1px solid #dee2e6'
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  if (roomMode !== "COLLABORATION") handleModeToggle();
+                }}
+                style={{
+                  border: 'none',
+                  background: roomMode === "COLLABORATION" ? '#ffffff' : 'transparent',
+                  color: roomMode === "COLLABORATION" ? '#1c7ed6' : '#495057',
+                  padding: '6px 14px',
+                  borderRadius: '18px',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease',
+                  boxShadow: roomMode === "COLLABORATION" ? '0 2px 4px rgba(0,0,0,0.05)' : 'none'
+                }}
+              >
+                Collaboration
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (roomMode !== "PRESENTATION") handleModeToggle();
+                }}
+                style={{
+                  border: 'none',
+                  background: roomMode === "PRESENTATION" ? '#ffffff' : 'transparent',
+                  color: roomMode === "PRESENTATION" ? '#fa5252' : '#495057',
+                  padding: '6px 14px',
+                  borderRadius: '18px',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease',
+                  boxShadow: roomMode === "PRESENTATION" ? '0 2px 4px rgba(0,0,0,0.05)' : 'none'
+                }}
+              >
+                Presentation
+              </button>
+            </div>
+          ) : (
+            <div
+              style={{
+                fontSize: '12px',
+                fontWeight: '600',
+                color: roomMode === "COLLABORATION" ? '#1c7ed6' : '#fa5252',
+                backgroundColor: roomMode === "COLLABORATION" ? '#e7f5ff' : '#ffe3e3',
+                padding: '6px 14px',
+                borderRadius: '18px',
+                border: `1px solid ${roomMode === "COLLABORATION" ? '#a5d8ff' : '#ffc9c9'}`,
+                fontFamily: "'Inter', sans-serif"
+              }}
+            >
+              {roomMode === "COLLABORATION" ? "Collab Mode" : "View Only"}
+            </div>
+          )}
+
+          {/* Centered Presentation Active Badge */}
+          {isPresentation && (
+            <span
+              style={{
+                fontSize: '11px',
+                fontWeight: '700',
+                color: '#fa5252',
+                backgroundColor: '#ffe3e3',
+                padding: '4px 10px',
+                borderRadius: '12px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                fontFamily: "'Inter', sans-serif"
+              }}
+            >
+              <span>🎥</span> Presentation Active
+            </span>
+          )}
+        </div>
+
+        {/* Right Side: Spacer block for visual alignment */}
+        <div style={{ width: '150px' }} />
+      </div>
+
+      {/* Floating Left Toolbar (Compact layout with a custom narrow scrollbar if overflow occurs) */}
       {showToolbar && (
-        <div className="d-flex align-items-center justify-content-between border p-3 rounded shadow-sm bg-white mb-3 flex-wrap gap-2">
-          <div className="d-flex align-items-center gap-3 flex-wrap">
+        <div
+          className="small-scrollbar"
+          style={{
+            position: 'absolute',
+            left: '20px',
+            top: '80px',
+            width: '135px',
+            maxHeight: 'calc(100vh - 110px)',
+            overflowY: 'auto',
+            zIndex: 1000,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+            padding: '10px',
+            background: '#ffffff',
+            borderRadius: '12px',
+            border: '1px solid #dee2e6',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.05)'
+          }}
+        >
+          {/* Tools Header */}
+          <span style={{ fontSize: '9px', fontWeight: '700', color: '#adb5bd', textTransform: 'uppercase', letterSpacing: '0.5px', textAlign: 'center' }}>Tools</span>
+          
+          {/* Tool Selectors */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
             {["pencil", "line", "rect", "circle", "arrow", "text"].map((t) => (
-              <div key={t} className="form-check d-flex align-items-center gap-1 mb-0">
+              <label
+                key={t}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '5px 6px',
+                  borderRadius: '6px',
+                  border: tool === t ? '1px solid #7048e8' : '1px solid transparent',
+                  background: tool === t ? '#f1f0fe' : 'transparent',
+                  color: tool === t ? '#7048e8' : '#495057',
+                  cursor: 'pointer',
+                  fontSize: '11.5px',
+                  fontWeight: tool === t ? '600' : '500',
+                  margin: 0,
+                  userSelect: 'none',
+                  transition: 'all 0.1s ease'
+                }}
+              >
                 <input
                   type="radio"
-                  name="tool"
-                  id={t}
+                  name="tool-selection"
                   checked={tool === t}
-                  value={t}
-                  className="form-check-input m-0"
-                  onChange={(e) => setTool(e.target.value)}
+                  onChange={() => setTool(t)}
+                  style={{
+                    accentColor: '#7048e8',
+                    cursor: 'pointer',
+                    margin: 0,
+                    transform: 'scale(0.95)'
+                  }}
                 />
-                <label htmlFor={t} className="form-check-label ms-1 m-0 text-capitalize">
-                  {t}
-                </label>
-              </div>
+                <span>
+                  {t === "pencil" && "Pencil"}
+                  {t === "line" && "Line"}
+                  {t === "rect" && "Rectangle"}
+                  {t === "circle" && "Circle"}
+                  {t === "arrow" && "Arrow"}
+                  {t === "text" && "Text"}
+                </span>
+              </label>
             ))}
           </div>
 
-          <div className="d-flex align-items-center">
-            <label htmlFor="color" className="fw-bold m-0">Color:</label>
+          <div style={{ width: '100%', height: '1px', backgroundColor: '#e9ecef', margin: '1px 0' }} />
+
+          {/* Color Chooser */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', alignItems: 'center' }}>
+            <span style={{ fontSize: '9px', fontWeight: '700', color: '#adb5bd', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Color</span>
             <input
               type="color"
-              id="color"
-              className="form-control-color ms-2"
               value={color}
               onChange={(e) => setColor(e.target.value)}
+              style={{
+                width: '28px',
+                height: '28px',
+                border: '1px solid #dee2e6',
+                borderRadius: '50%',
+                padding: 0,
+                cursor: 'pointer',
+                outline: 'none',
+                background: 'transparent'
+              }}
+              title="Stroke Color"
             />
           </div>
 
-          <div className="d-flex gap-2">
+          <div style={{ width: '100%', height: '1px', backgroundColor: '#e9ecef', margin: '1px 0' }} />
+
+          {/* Actions Header */}
+          <span style={{ fontSize: '9px', fontWeight: '700', color: '#adb5bd', textTransform: 'uppercase', letterSpacing: '0.5px', textAlign: 'center' }}>Actions</span>
+          
+          {/* Action List */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
             <button
-              className="btn btn-primary"
+              type="button"
               disabled={myElementCount === 0}
               onClick={handleUndo}
-              title="Ctrl+Z"
+              style={{
+                padding: '5px 6px',
+                borderRadius: '6px',
+                border: '1px solid #dee2e6',
+                background: myElementCount === 0 ? '#f8f9fa' : '#ffffff',
+                color: myElementCount === 0 ? '#adb5bd' : '#495057',
+                cursor: myElementCount === 0 ? 'not-allowed' : 'pointer',
+                fontSize: '11px',
+                fontWeight: '600',
+                textAlign: 'center',
+                transition: 'all 0.1s ease'
+              }}
             >
-              ↩ Undo
+              Undo
             </button>
+
             <button
-              className="btn btn-outline-primary"
+              type="button"
               disabled={myUndoStack.length === 0}
               onClick={handleRedo}
-              title="Ctrl+Y"
+              style={{
+                padding: '5px 6px',
+                borderRadius: '6px',
+                border: '1px solid #dee2e6',
+                background: myUndoStack.length === 0 ? '#f8f9fa' : '#ffffff',
+                color: myUndoStack.length === 0 ? '#adb5bd' : '#495057',
+                cursor: myUndoStack.length === 0 ? 'not-allowed' : 'pointer',
+                fontSize: '11px',
+                fontWeight: '600',
+                textAlign: 'center',
+                transition: 'all 0.1s ease'
+              }}
             >
-              ↪ Redo
+              Redo
+            </button>
+
+            <button
+              type="button"
+              onClick={handleClearCanvas}
+              style={{
+                padding: '5px 6px',
+                borderRadius: '6px',
+                border: '1px solid #ffe3e3',
+                background: '#fff5f5',
+                color: '#e03131',
+                cursor: 'pointer',
+                fontSize: '11px',
+                fontWeight: '600',
+                textAlign: 'center',
+                transition: 'all 0.1s ease'
+              }}
+            >
+              Clear
+            </button>
+
+            <button
+              type="button"
+              onClick={exportCanvas}
+              style={{
+                padding: '5px 6px',
+                borderRadius: '6px',
+                border: '1px solid #dee2e6',
+                background: '#ffffff',
+                color: '#2b8a3e',
+                cursor: 'pointer',
+                fontSize: '11px',
+                fontWeight: '600',
+                textAlign: 'center',
+                transition: 'all 0.1s ease'
+              }}
+            >
+              Export
             </button>
           </div>
 
-          <div className="d-flex gap-2 align-items-center">
-            <button className="btn btn-danger" onClick={handleClearCanvas}>
-              Clear
-            </button>
-            <button onClick={exportCanvas} className="btn btn-export">
-              Export to PNG
+          <div style={{ width: '100%', height: '1px', backgroundColor: '#e9ecef', margin: '1px 0' }} />
+
+          {/* AI Services Header */}
+          <span style={{ fontSize: '9px', fontWeight: '700', color: '#adb5bd', textTransform: 'uppercase', letterSpacing: '0.5px', textAlign: 'center' }}>AI Services</span>
+          
+          {/* AI Commands */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+            <button
+              type="button"
+              onClick={() => handleAiAction("summarize")}
+              style={{
+                padding: '5px 6px',
+                borderRadius: '6px',
+                border: '1px solid #dee2e6',
+                background: '#ffffff',
+                color: '#495057',
+                cursor: 'pointer',
+                fontSize: '11px',
+                fontWeight: '600',
+                textAlign: 'center',
+                transition: 'all 0.1s ease'
+              }}
+            >
+              Summary
             </button>
 
-            {isHost && (
-              <div className="d-flex align-items-center gap-2 ms-2 border rounded px-3 py-1 bg-light">
-                <span className="fw-semibold small">
-                  {roomMode === "COLLABORATION" ? "🤝 Collab" : "🎥 Present"}
-                </span>
-                <div className="form-check form-switch mb-0">
-                  <input
-                    className="form-check-input"
-                    type="checkbox"
-                    role="switch"
-                    id="modeSwitch"
-                    checked={roomMode === "PRESENTATION"}
-                    onChange={handleModeToggle}
-                  />
-                  <label className="form-check-label" htmlFor="modeSwitch">
-                    Presentation
-                  </label>
-                </div>
-              </div>
-            )}
+            <button
+              type="button"
+              onClick={() => handleAiAction("analyze")}
+              style={{
+                padding: '5px 6px',
+                borderRadius: '6px',
+                border: '1px solid #dee2e6',
+                background: '#ffffff',
+                color: '#495057',
+                cursor: 'pointer',
+                fontSize: '11px',
+                fontWeight: '600',
+                textAlign: 'center',
+                transition: 'all 0.1s ease'
+              }}
+            >
+              Analyze
+            </button>
           </div>
         </div>
       )}
 
-      <div className="flex-grow-1 w-100 mb-4 canvas-box bg-white border rounded shadow-sm overflow-hidden position-relative">
-        <WhiteBoard
-          canvasRef={canvasRef}
-          ctxRef={ctxRef}
-          elements={elements}
-          setElements={setElements}
-          color={color}
-          tool={tool}
-          socket={socket}
-          user={user}
-          isPresentation={isPresentation}
-          isHost={isHost}
-          canvasClearVersion={canvasClearVersion}
-        />
-      </div>
+      {/* Floating Right AI Side Panel (Shifted further inward to right: '120px' to bring it more towards the screen center) */}
+      {aiOutput && (
+        <div
+          style={{
+            position: 'absolute',
+            right: '120px', // Shifted inward from 60px to 120px
+            top: '80px',
+            bottom: '40px',
+            width: '340px',
+            background: '#ffffff',
+            borderRadius: '12px',
+            border: '1px solid #dee2e6',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.05)',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            zIndex: 1000
+          }}
+        >
+          {/* Header Close Option */}
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '12px 15px',
+              borderBottom: '1px solid #dee2e6',
+              background: '#f8f9fa',
+              flexShrink: 0
+            }}
+          >
+            <span
+              style={{
+                fontWeight: '700',
+                fontSize: '12px',
+                color: '#495057',
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+                fontFamily: "'Inter', sans-serif"
+              }}
+            >
+              {panelMode || "AI Assist"}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                if (typeof setAiOutput === 'function') {
+                  setAiOutput("");
+                }
+              }}
+              style={{
+                border: 'none',
+                background: 'transparent',
+                cursor: 'pointer',
+                fontSize: '13px',
+                color: '#fa5252',
+                fontWeight: '600'
+              }}
+            >
+              ❌ Close
+            </button>
+          </div>
+
+          {/* Scrollable Text Area with vertical scrollbar, spacing, and high readability */}
+          <div
+            className="small-scrollbar" // Switched from hide-scrollbar to small-scrollbar
+            style={{
+              flex: 1,
+              overflowY: 'auto',
+              padding: '18px',
+              fontSize: '14.5px',       // Clear readable text size
+              lineHeight: '1.65',       // High readability line spacing
+              color: '#212529',          // Clear dark readable text color
+              whiteSpace: 'pre-wrap',
+              fontFamily: "'Inter', 'Segoe UI', sans-serif"
+            }}
+          >
+            {aiOutput}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

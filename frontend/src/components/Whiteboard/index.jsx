@@ -1,4 +1,5 @@
 // frontend/src/components/Whiteboard/index.jsx
+// frontend/src/components/Whiteboard/index.jsx
 import { useEffect, useState, useLayoutEffect, useRef, useCallback } from "react";
 import rough from "roughjs";
 import "./index.css";
@@ -670,6 +671,26 @@ const WhiteBoard = ({
     });
   };
 
+  // ── Native non-passive Wheel Event Setup ──────────────────────────────────
+  const handleWheelRef = useRef(handleWheel);
+  useEffect(() => {
+    handleWheelRef.current = handleWheel;
+  }, [handleWheel]);
+
+  useEffect(() => {
+    const container = canvasContainerRef.current;
+    if (!container) return;
+
+    const onWheelNative = (e) => {
+      handleWheelRef.current(e);
+    };
+
+    container.addEventListener("wheel", onWheelNative, { passive: false });
+    return () => {
+      container.removeEventListener("wheel", onWheelNative);
+    };
+  }, []);
+
   const handleMouseDown = (e) => {
     if (isBlocked) return;
 
@@ -1039,7 +1060,6 @@ const WhiteBoard = ({
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseUp}
-      onWheel={handleWheel}
       onClick={handleCanvasClick}
       onDoubleClick={handleCanvasDoubleClick}
       onContextMenu={(e) => e.preventDefault()}
