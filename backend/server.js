@@ -1,8 +1,16 @@
 // backend/server.js
-// Initialize dotenv at the absolute top of your application to load environment variables
+// Force IPv4 prioritisation to bypass Windows local DNS/SSL handshake blocks (alert 80)
+const dns = require("dns");
+dns.setDefaultResultOrder("ipv4first");
+
 require("dotenv").config();
 
 const express = require("express");
+const mongoose = require("mongoose");
+
+// 1. Disable command buffering globally immediately upon importing mongoose
+mongoose.set("bufferCommands", false);
+
 const app = express();
 
 const server = require("http").createServer(app);
@@ -11,8 +19,21 @@ const io = new Server(server, {
   cors: { origin: "*" }
 });
 
-// Import the isolated AI routes
+// Import the isolated AI routes and DB models
 const aiRoutes = require("./ai");
+const Room = require("./Room");
+
+// Establish database connection
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => {
+    console.log("🚀 MongoDB Connected Successfully!");
+  })
+  .catch((err) => {
+    console.error("⚠️ Database connection error: Whiteboard falling back to resilient in-memory mode.");
+  });
+
+// Helper utility to check if the database connection is open and active
+const isDbConnected = () => mongoose.connection.readyState === 1;
 
 // Enable JSON parsing middleware
 app.use(express.json());
@@ -32,7 +53,7 @@ app.use((req, res, next) => {
 // Mount the AI API endpoint under /api/ai
 app.use("/api/ai", aiRoutes);
 
-// Per-room state
+// Per-room state (lightning-fast local in-memory fallback)
 const roomElements = {}; // roomId -> elements[]
 const roomLocks   = {}; // roomId -> { elementId: { userId, userName } }
 const roomModes   = {}; // roomId -> "COLLABORATION" | "PRESENTATION"
@@ -45,9 +66,11 @@ app.get("/", (req, res) => {
 
 io.on("connection", (socket) => {
 
-  // ── User joins room ───────────────────────────────────────────────────────
-  socket.on("userJoined", (data) => {
+  // ── Unified Handler for Room Joins ────────────────────────────────────────
+  const handleUserJoin = async (socket, data) => {
     const { name, userId, roomId, host } = data;
+    if (!roomId) return;
+
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.userId = userId;
@@ -61,9 +84,31 @@ io.on("connection", (socket) => {
 
     socket.emit("userIsJoined", { success: true });
 
-    if (roomElements[roomId]) {
-      socket.emit("canvasState", roomElements[roomId]);
+    let fetchedElements = [];
+
+    // Safely attempt database loading only if mongoose is connected
+    if (isDbConnected()) {
+      try {
+        let room = await Room.findOne({ roomId });
+        if (!room) {
+          room = await Room.create({ roomId, elements: [] });
+        }
+        roomElements[roomId] = room.elements;
+        fetchedElements = room.elements;
+      } catch (err) {
+        console.error("Database read error, falling back to local memory:", err.message);
+        fetchedElements = roomElements[roomId] || [];
+      }
+    } else {
+      // Gracefully fall back to local server memory when database is offline
+      fetchedElements = roomElements[roomId] || [];
     }
+
+    // Emit standard state to keep your existing frontend handler working
+    socket.emit("canvasState", fetchedElements);
+    // Emit back to only the joining client
+    socket.emit("load-canvas", fetchedElements);
+
     socket.emit("roomMode", roomModes[roomId] || "COLLABORATION");
 
     const roster = Object.values(roomUsers[roomId]);
@@ -77,7 +122,11 @@ io.on("connection", (socket) => {
         socket.emit("element-lock", { elementId, ...lockInfo });
       });
     }
-  });
+  };
+
+  // Bind both potential connection events to ensure resilient handshakes
+  socket.on("userJoined", (data) => handleUserJoin(socket, data));
+  socket.on("joinRoom", (data) => handleUserJoin(socket, data));
 
   socket.on("disconnect", () => {
     const { roomId, userId, name } = socket.data;
@@ -90,19 +139,37 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ── Clear canvas (instant broadcast to entire room) ─────────────────────
-  socket.on("clearCanvas", (data) => {
+  // ── Clear canvas (cleared elements persisted to DB if online) ───────────
+  socket.on("clearCanvas", async (data) => {
     const { roomId } = data;
     roomElements[roomId] = [];
     if (roomLocks[roomId]) roomLocks[roomId] = {};
+
+    if (isDbConnected()) {
+      try {
+        await Room.updateOne({ roomId }, { $set: { elements: [] } }, { upsert: true });
+      } catch (err) {
+        console.error("Database clear error:", err.message);
+      }
+    }
+
     io.to(roomId).emit("canvasCleared");
     io.to(roomId).emit("canvasState", []);
   });
 
-  // ── Drawing elements (live preview + final) ───────────────────────────────
-  socket.on("elementUpdated", (data) => {
+  // ── Drawing elements (updated to memory and safely queued to DB) ───────
+  socket.on("elementUpdated", async (data) => {
     const { roomId, elements } = data;
     roomElements[roomId] = elements;
+
+    if (isDbConnected()) {
+      try {
+        await Room.updateOne({ roomId }, { $set: { elements } }, { upsert: true });
+      } catch (err) {
+        console.error("Database update error:", err.message);
+      }
+    }
+
     if (Array.isArray(elements) && elements.length === 0) {
       io.to(roomId).emit("canvasCleared");
     }
@@ -110,7 +177,7 @@ io.on("connection", (socket) => {
   });
 
   // ── Text element saved ────────────────────────────────────────────────────
-  socket.on("textSaved", (data) => {
+  socket.on("textSaved", async (data) => {
     const { roomId, element } = data;
     if (!roomElements[roomId]) roomElements[roomId] = [];
     const idx = roomElements[roomId].findIndex(e => e.id === element.id);
@@ -119,6 +186,15 @@ io.on("connection", (socket) => {
     } else {
       roomElements[roomId].push(element);
     }
+
+    if (isDbConnected()) {
+      try {
+        await Room.updateOne({ roomId }, { $set: { elements: roomElements[roomId] } }, { upsert: true });
+      } catch (err) {
+        console.error("Database text-saving error:", err.message);
+      }
+    }
+
     socket.to(roomId).emit("textSaved", element);
   });
 
@@ -159,18 +235,36 @@ io.on("connection", (socket) => {
   });
 
   // ── Undo / Redo ───────────────────────────────────────────────────────────
-  socket.on("elementDeleted", (data) => {
+  socket.on("elementDeleted", async (data) => {
     const { roomId, elementId } = data;
     if (roomElements[roomId]) {
       roomElements[roomId] = roomElements[roomId].filter(e => e.id !== elementId);
     }
+
+    if (isDbConnected()) {
+      try {
+        await Room.updateOne({ roomId }, { $set: { elements: roomElements[roomId] || [] } }, { upsert: true });
+      } catch (err) {
+        console.error("Database undo sync error:", err.message);
+      }
+    }
+
     socket.to(roomId).emit("elementDeleted", elementId);
   });
 
-  socket.on("elementRestored", (data) => {
+  socket.on("elementRestored", async (data) => {
     const { roomId, element } = data;
     if (!roomElements[roomId]) roomElements[roomId] = [];
     roomElements[roomId].push(element);
+
+    if (isDbConnected()) {
+      try {
+        await Room.updateOne({ roomId }, { $set: { elements: roomElements[roomId] } }, { upsert: true });
+      } catch (err) {
+        console.error("Database redo sync error:", err.message);
+      }
+    }
+
     socket.to(roomId).emit("elementRestored", element);
   });
 

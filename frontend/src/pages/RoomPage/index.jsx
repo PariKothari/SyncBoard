@@ -1,5 +1,6 @@
 // frontend/src/pages/RoomPage/index.jsx
 import { useState, useRef, useEffect, useCallback } from "react";
+import { useParams } from "react-router-dom";
 import "./index.css";
 import WhiteBoard from "../../components/Whiteboard";
 
@@ -23,6 +24,43 @@ const formatAiResponse = (text) => {
 const RoomPage = ({ socket, user }) => {
   const canvasRef = useRef(null);
   const ctxRef = useRef(null);
+  const { roomId } = useParams();
+
+  // Handle local session caching to preserve ownership properties across refreshes
+  const [currentUser, setCurrentUser] = useState(() => {
+    if (user) {
+      const sessionKey = `syncboard_user_${user.roomId}`;
+      sessionStorage.setItem(sessionKey, JSON.stringify(user));
+      return user;
+    }
+
+    const sessionKey = `syncboard_user_${roomId}`;
+    const cached = sessionStorage.getItem(sessionKey);
+    if (cached) {
+      try {
+        return JSON.parse(cached);
+      } catch (e) {
+        // Parse error fallback
+      }
+    }
+
+    const genUuid = () => {
+      const S4 = () => (((1 + Math.random()) * 0x10000) | 0).toString(16).substring(1);
+      return S4() + S4() + "-" + S4() + "-" + S4() + "-" + S4() + "-" + S4() + S4() + S4();
+    };
+
+    const newUserId = genUuid();
+    const guestUserObj = {
+      name: `Guest-${newUserId.slice(0, 4)}`,
+      roomId: roomId,
+      userId: newUserId,
+      host: false,
+      presenter: false,
+    };
+
+    sessionStorage.setItem(sessionKey, JSON.stringify(guestUserObj));
+    return guestUserObj;
+  });
 
   const [tool, setTool] = useState("pencil");
   const [color, setColor] = useState("#000000");
@@ -36,7 +74,7 @@ const RoomPage = ({ socket, user }) => {
   const [panelMode, setPanelMode] = useState("");
 
   const isPresentation = roomMode === "PRESENTATION";
-  const isHost = user?.host === true;
+  const isHost = currentUser?.host === true;
 
   const forceCanvasRedraw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -57,7 +95,15 @@ const RoomPage = ({ socket, user }) => {
   }, [forceCanvasRedraw]);
 
   useEffect(() => {
-    if (!socket || !user?.roomId || !user?.userId || !user?.name) return;
+    if (user) {
+      setCurrentUser(user);
+      const sessionKey = `syncboard_user_${user.roomId}`;
+      sessionStorage.setItem(sessionKey, JSON.stringify(user));
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (!socket || !currentUser?.roomId || !currentUser?.userId || !currentUser?.name) return;
 
     const onCanvasState = (incomingElements) => {
       const next = Array.isArray(incomingElements) ? incomingElements : [];
@@ -90,16 +136,17 @@ const RoomPage = ({ socket, user }) => {
     const onRoomMode = (mode) => setRoomMode(mode);
 
     const emitJoinRoom = () => {
-      socket.emit("joinRoom", {
-        name: user.name,
-        userId: user.userId,
-        roomId: user.roomId,
-        host: user.host ?? false,
-        presenter: user.presenter ?? false,
+      socket.emit("userJoined", {
+        name: currentUser.name,
+        userId: currentUser.userId,
+        roomId: currentUser.roomId,
+        host: currentUser.host ?? false,
+        presenter: currentUser.presenter ?? false,
       });
     };
 
     socket.on("canvasState", onCanvasState);
+    socket.on("load-canvas", onCanvasState);
     socket.on("canvasCleared", onCanvasCleared);
     socket.on("textSaved", onTextSaved);
     socket.on("elementDeleted", onElementDeleted);
@@ -112,49 +159,57 @@ const RoomPage = ({ socket, user }) => {
     return () => {
       socket.off("connect", emitJoinRoom);
       socket.off("canvasState", onCanvasState);
+      socket.off("load-canvas", onCanvasState);
       socket.off("canvasCleared", onCanvasCleared);
       socket.off("textSaved", onTextSaved);
       socket.off("elementDeleted", onElementDeleted);
       socket.off("elementRestored", onElementRestored);
       socket.off("roomMode", onRoomMode);
     };
-  }, [socket, user, applyCanvasClear, forceCanvasRedraw]);
+  }, [socket, currentUser, applyCanvasClear, forceCanvasRedraw]);
 
   const handleClearCanvas = () => {
     applyCanvasClear();
-    if (socket && user) {
-      socket.emit("clearCanvas", { roomId: user.roomId });
-      socket.emit("elementUpdated", { roomId: user.roomId, elements: [] });
+    if (socket && currentUser) {
+      socket.emit("clearCanvas", { roomId: currentUser.roomId });
+      socket.emit("elementUpdated", { roomId: currentUser.roomId, elements: [] });
     }
   };
 
+  // Safe separate updates without nesting callback loops
   const handleUndo = useCallback(() => {
-    if (!user) return;
-    setElements((prev) => {
-      for (let i = prev.length - 1; i >= 0; i--) {
-        if (prev[i].userId === user.userId) {
-          const removed = prev[i];
-          const updated = prev.filter((_, idx) => idx !== i);
-          setMyUndoStack((s) => [...s, removed]);
-          if (socket) {
-            socket.emit("elementDeleted", { roomId: user.roomId, elementId: removed.id });
-          }
-          return updated;
-        }
-      }
-      return prev;
-    });
-  }, [user, socket]);
+    if (!currentUser) return;
 
-  const handleRedo = useCallback(() => {
-    if (!user || myUndoStack.length === 0) return;
-    const element = myUndoStack[myUndoStack.length - 1];
-    setMyUndoStack((s) => s.slice(0, -1));
-    setElements((prev) => [...prev, element]);
+    const lastUserElementIdx = elements.reduce((acc, el, idx) => {
+      if (el.userId === currentUser.userId) return idx;
+      return acc;
+    }, -1);
+
+    if (lastUserElementIdx === -1) return;
+
+    const removed = elements[lastUserElementIdx];
+
+    setElements((prev) => prev.filter((_, idx) => idx !== lastUserElementIdx));
+    setMyUndoStack((prev) => [...prev, removed]);
+
     if (socket) {
-      socket.emit("elementRestored", { roomId: user.roomId, element });
+      socket.emit("elementDeleted", { roomId: currentUser.roomId, elementId: removed.id });
     }
-  }, [user, socket, myUndoStack]);
+  }, [currentUser, socket, elements]);
+
+  // Safe separate updates with correct closure dependencies
+  const handleRedo = useCallback(() => {
+    if (!currentUser || myUndoStack.length === 0) return;
+
+    const element = myUndoStack[myUndoStack.length - 1];
+
+    setMyUndoStack((prev) => prev.slice(0, -1));
+    setElements((prev) => [...prev, element]);
+
+    if (socket) {
+      socket.emit("elementRestored", { roomId: currentUser.roomId, element });
+    }
+  }, [currentUser, socket, myUndoStack]);
 
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -172,12 +227,11 @@ const RoomPage = ({ socket, user }) => {
   }, [handleUndo, handleRedo]);
 
   const handleModeToggle = () => {
-    if (!socket || !user) return;
+    if (!socket || !currentUser) return;
     const newMode = roomMode === "COLLABORATION" ? "PRESENTATION" : "COLLABORATION";
-    socket.emit("roomModeChange", { roomId: user.roomId, mode: newMode });
+    socket.emit("roomModeChange", { roomId: currentUser.roomId, mode: newMode });
   };
 
-  // ── AI Service Core Handler ───────────────────────────────────────────────
   const handleAiAction = async (mode) => {
     const title = mode === "summarize" ? "Board Summary" : "Stack Analysis";
     setPanelMode(title);
@@ -209,7 +263,6 @@ const RoomPage = ({ socket, user }) => {
       const data = await response.json();
 
       if (response.ok && data.success) {
-        // Formats and cleans the markdown text response before displaying it
         setAiOutput(formatAiResponse(data.result));
       } else {
         setAiOutput(`❌ Error: ${data.error || "Failed to parse AI assistance response."}`);
@@ -222,7 +275,7 @@ const RoomPage = ({ socket, user }) => {
     }
   };
 
-  const myElementCount = elements.filter((e) => e.userId === user?.userId).length;
+  const myElementCount = elements.filter((e) => e.userId === currentUser?.userId).length;
   const showToolbar = isHost || !isPresentation;
 
   const exportCanvas = () => {
@@ -261,7 +314,6 @@ const RoomPage = ({ socket, user }) => {
         padding: 0
       }}
     >
-      {/* Global Scrollbar Reset and Narrow Scrollbar Styles */}
       <style>{`
         html, body {
           overflow: hidden !important;
@@ -292,7 +344,6 @@ const RoomPage = ({ socket, user }) => {
         }
       `}</style>
 
-      {/* Underlying Interactive Canvas */}
       <WhiteBoard
         canvasRef={canvasRef}
         ctxRef={ctxRef}
@@ -301,13 +352,12 @@ const RoomPage = ({ socket, user }) => {
         color={color}
         tool={tool}
         socket={socket}
-        user={user}
+        user={currentUser}
         isPresentation={isPresentation}
         isHost={isHost}
         canvasClearVersion={canvasClearVersion}
       />
 
-      {/* Top Nav Bar */}
       <div
         style={{
           position: 'absolute',
@@ -324,7 +374,6 @@ const RoomPage = ({ socket, user }) => {
           zIndex: 1001
         }}
       >
-        {/* Left Side: Logo & Room Metadata */}
         <div style={{ display: 'flex', alignItems: 'center' }}>
           <span
             style={{
@@ -350,11 +399,10 @@ const RoomPage = ({ socket, user }) => {
               fontFamily: "'Inter', sans-serif"
             }}
           >
-            Room: {user?.roomId ?? "—"}
+            Room: {currentUser?.roomId ?? "—"}
           </span>
         </div>
 
-        {/* Center Container: Unified Mode Selector & Active Presentation Alert */}
         <div
           style={{
             position: 'absolute',
@@ -435,7 +483,6 @@ const RoomPage = ({ socket, user }) => {
             </div>
           )}
 
-          {/* Centered Presentation Active Badge */}
           {isPresentation && (
             <span
               style={{
@@ -456,11 +503,9 @@ const RoomPage = ({ socket, user }) => {
           )}
         </div>
 
-        {/* Right Side: Spacer block for visual alignment */}
         <div style={{ width: '150px' }} />
       </div>
 
-      {/* Floating Left Toolbar (Compact layout with a custom narrow scrollbar if overflow occurs) */}
       {showToolbar && (
         <div
           className="small-scrollbar"
@@ -482,10 +527,8 @@ const RoomPage = ({ socket, user }) => {
             boxShadow: '0 8px 24px rgba(0,0,0,0.05)'
           }}
         >
-          {/* Tools Header */}
           <span style={{ fontSize: '9px', fontWeight: '700', color: '#adb5bd', textTransform: 'uppercase', letterSpacing: '0.5px', textAlign: 'center' }}>Tools</span>
           
-          {/* Tool Selectors */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
             {["pencil", "line", "rect", "circle", "arrow", "text"].map((t) => (
               <label
@@ -533,7 +576,6 @@ const RoomPage = ({ socket, user }) => {
 
           <div style={{ width: '100%', height: '1px', backgroundColor: '#e9ecef', margin: '1px 0' }} />
 
-          {/* Color Chooser */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', alignItems: 'center' }}>
             <span style={{ fontSize: '9px', fontWeight: '700', color: '#adb5bd', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Color</span>
             <input
@@ -556,10 +598,8 @@ const RoomPage = ({ socket, user }) => {
 
           <div style={{ width: '100%', height: '1px', backgroundColor: '#e9ecef', margin: '1px 0' }} />
 
-          {/* Actions Header */}
           <span style={{ fontSize: '9px', fontWeight: '700', color: '#adb5bd', textTransform: 'uppercase', letterSpacing: '0.5px', textAlign: 'center' }}>Actions</span>
           
-          {/* Action List */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
             <button
               type="button"
@@ -642,10 +682,8 @@ const RoomPage = ({ socket, user }) => {
 
           <div style={{ width: '100%', height: '1px', backgroundColor: '#e9ecef', margin: '1px 0' }} />
 
-          {/* AI Services Header */}
           <span style={{ fontSize: '9px', fontWeight: '700', color: '#adb5bd', textTransform: 'uppercase', letterSpacing: '0.5px', textAlign: 'center' }}>AI Services</span>
           
-          {/* AI Commands */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
             <button
               type="button"
@@ -688,12 +726,11 @@ const RoomPage = ({ socket, user }) => {
         </div>
       )}
 
-      {/* Floating Right AI Side Panel (Shifted further inward to right: '120px' to bring it more towards the screen center) */}
       {aiOutput && (
         <div
           style={{
             position: 'absolute',
-            right: '120px', // Shifted inward from 60px to 120px
+            right: '120px',
             top: '80px',
             bottom: '40px',
             width: '340px',
@@ -707,7 +744,6 @@ const RoomPage = ({ socket, user }) => {
             zIndex: 1000
           }}
         >
-          {/* Header Close Option */}
           <div
             style={{
               display: 'flex',
@@ -751,16 +787,15 @@ const RoomPage = ({ socket, user }) => {
             </button>
           </div>
 
-          {/* Scrollable Text Area with vertical scrollbar, spacing, and high readability */}
           <div
-            className="small-scrollbar" // Switched from hide-scrollbar to small-scrollbar
+            className="small-scrollbar"
             style={{
               flex: 1,
               overflowY: 'auto',
               padding: '18px',
-              fontSize: '14.5px',       // Clear readable text size
-              lineHeight: '1.65',       // High readability line spacing
-              color: '#212529',          // Clear dark readable text color
+              fontSize: '14.5px',
+              lineHeight: '1.65',
+              color: '#212529',
               whiteSpace: 'pre-wrap',
               fontFamily: "'Inter', 'Segoe UI', sans-serif"
             }}
