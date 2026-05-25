@@ -1,4 +1,3 @@
-
 // frontend/src/App.jsx
 import './App.css'
 import Forms from './components/Forms'
@@ -7,7 +6,7 @@ import RoomPage from './pages/RoomPage'
 import io from "socket.io-client"
 import { useState, useEffect } from 'react'
 
-const server = "http://localhost:5000";
+const server = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
 const connectionOptions = {
   "force new connection": true,
   reconnectionAttempts: "Infinity",

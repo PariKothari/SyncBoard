@@ -285,8 +285,10 @@ const RoomPage = ({ socket, user }) => {
       return;
     }
 
+    const backendUrl = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
+
     try {
-      const response = await fetch("http://localhost:5000/api/ai/assistant", {
+      const response = await fetch(`${backendUrl}/api/ai/assistant`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -307,7 +309,7 @@ const RoomPage = ({ socket, user }) => {
     } catch (err) {
       console.error("AI service fetch error:", err);
       setAiOutput(
-        "❌ Server Error: Could not connect to the backend AI API. Please verify that your backend server is running on http://localhost:5000 and that GEMINI_API_KEY is loaded."
+        `❌ Server Error: Could not connect to the backend AI API. Please verify that your backend server is running on ${backendUrl} and that GEMINI_API_KEY is loaded.`
       );
     }
   };
