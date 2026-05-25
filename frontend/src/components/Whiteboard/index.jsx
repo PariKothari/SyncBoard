@@ -1,4 +1,4 @@
-// frontend/src/components/Whiteboard/index.jsx
+
 // frontend/src/components/Whiteboard/index.jsx
 import { useEffect, useState, useLayoutEffect, useRef, useCallback } from "react";
 import rough from "roughjs";

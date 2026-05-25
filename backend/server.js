@@ -60,13 +60,65 @@ const roomModes   = {}; // roomId -> "COLLABORATION" | "PRESENTATION"
 const roomHosts   = {}; // roomId -> userId
 const roomUsers   = {}; // roomId -> { [userId]: { userId, name } }
 
+// Roster state tracking (socketId -> username mapping)
+const socketUsers = {}; // roomId -> { [socketId]: username }
+
 app.get("/", (req, res) => {
   res.send("this is realtime whiteboard sharing app");
 });
 
 io.on("connection", (socket) => {
 
-  // ── Unified Handler for Room Joins ────────────────────────────────────────
+  // Helper to cleanly execute user removal and broadcast updated rosters
+  const handleLeaveRoomLogic = (socket) => {
+    const roomId = socket.data.roomId;
+    const { userId, name } = socket.data;
+
+    // Remove socket user from the custom active users mapping
+    if (roomId && socketUsers[roomId] && socketUsers[roomId][socket.id]) {
+      delete socketUsers[roomId][socket.id];
+      const activeUsersList = Object.values(socketUsers[roomId]);
+      io.to(roomId).emit("room-users", activeUsersList);
+    }
+
+    // Clean up standard state lists
+    if (roomId && userId && roomUsers[roomId]) {
+      delete roomUsers[roomId][userId];
+      const roster = Object.values(roomUsers[roomId]);
+      io.to(roomId).emit("userLeft", { userId, name });
+      io.to(roomId).emit("allUsers", roster);
+    }
+  };
+
+  // ── Roster "join-room" handler ───────────────────────────────────────────
+  socket.on("join-room", (data) => {
+    const { roomId, username } = data;
+    if (!roomId) return;
+
+    socket.join(roomId);
+    socket.data.roomId = roomId;
+    socket.data.username = username;
+
+    if (!socketUsers[roomId]) {
+      socketUsers[roomId] = {};
+    }
+    // Track which socket ID belongs to which username
+    socketUsers[roomId][socket.id] = username;
+
+    // Recalculate active users list for that specific room
+    const activeUsersList = Object.values(socketUsers[roomId]);
+
+    // Broadcast the updated users list to everyone in the room
+    io.to(roomId).emit("room-users", activeUsersList);
+
+    // Bootstrap canvas state synchronization for the newly connected user
+    let fetchedElements = roomElements[roomId] || [];
+    socket.emit("canvasState", fetchedElements);
+    socket.emit("load-canvas", fetchedElements);
+    socket.emit("roomMode", roomModes[roomId] || "COLLABORATION");
+  });
+
+  // ── Unified Handler for Legacy Room Joins ─────────────────────────────────
   const handleUserJoin = async (socket, data) => {
     const { name, userId, roomId, host } = data;
     if (!roomId) return;
@@ -128,15 +180,18 @@ io.on("connection", (socket) => {
   socket.on("userJoined", (data) => handleUserJoin(socket, data));
   socket.on("joinRoom", (data) => handleUserJoin(socket, data));
 
-  socket.on("disconnect", () => {
-    const { roomId, userId, name } = socket.data;
-    if (!roomId || !userId) return;
-    if (roomUsers[roomId]) {
-      delete roomUsers[roomId][userId];
-      const roster = Object.values(roomUsers[roomId]);
-      io.to(roomId).emit("userLeft", { userId, name });
-      io.to(roomId).emit("allUsers", roster);
+  // Explicit leave room receiver
+  socket.on("leave-room", () => {
+    const roomId = socket.data.roomId;
+    handleLeaveRoomLogic(socket);
+    if (roomId) {
+      socket.leave(roomId);
     }
+  });
+
+  // Disconnect handler
+  socket.on("disconnect", () => {
+    handleLeaveRoomLogic(socket);
   });
 
   // ── Clear canvas (cleared elements persisted to DB if online) ───────────

@@ -23,7 +23,7 @@ const Forms = ({ uuid, socket, setUser }) => {
                     </h1>
                     
                     <p className="saas-subtitle mb-5">
-                        An interactive real-time workspace with built-in element locking, Mongoose-backed persistence, and automated AI assistance.
+                        An interactive real-time workspace.
                     </p>
                     
                     <div className="saas-features">

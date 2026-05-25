@@ -1,6 +1,6 @@
 // frontend/src/pages/RoomPage/index.jsx
 import { useState, useRef, useEffect, useCallback } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import "./index.css";
 import WhiteBoard from "../../components/Whiteboard";
 
@@ -25,6 +25,10 @@ const RoomPage = ({ socket, user }) => {
   const canvasRef = useRef(null);
   const ctxRef = useRef(null);
   const { roomId } = useParams();
+  const navigate = useNavigate();
+
+  // Active users roster state hook
+  const [activeUsers, setActiveUsers] = useState([]);
 
   // Handle local session caching to preserve ownership properties across refreshes
   const [currentUser, setCurrentUser] = useState(() => {
@@ -36,11 +40,23 @@ const RoomPage = ({ socket, user }) => {
 
     const sessionKey = `syncboard_user_${roomId}`;
     const cached = sessionStorage.getItem(sessionKey);
+    let cachedUser = null;
     if (cached) {
       try {
-        return JSON.parse(cached);
+        cachedUser = JSON.parse(cached);
       } catch (e) {
         // Parse error fallback
+      }
+    }
+
+    // Prompts users for their name if they do not already have one
+    let name = cachedUser?.name || "";
+    if (!name) {
+      name = prompt("Enter your name to join the workspace:");
+      if (!name || !name.trim()) {
+        name = `Guest-${Math.floor(1000 + Math.random() * 9000)}`;
+      } else {
+        name = name.trim();
       }
     }
 
@@ -49,13 +65,12 @@ const RoomPage = ({ socket, user }) => {
       return S4() + S4() + "-" + S4() + "-" + S4() + "-" + S4() + "-" + S4() + S4() + S4();
     };
 
-    const newUserId = genUuid();
     const guestUserObj = {
-      name: `Guest-${newUserId.slice(0, 4)}`,
+      name: name,
       roomId: roomId,
-      userId: newUserId,
-      host: false,
-      presenter: false,
+      userId: cachedUser?.userId || genUuid(),
+      host: cachedUser?.host ?? false,
+      presenter: cachedUser?.presenter ?? false,
     };
 
     sessionStorage.setItem(sessionKey, JSON.stringify(guestUserObj));
@@ -135,7 +150,19 @@ const RoomPage = ({ socket, user }) => {
 
     const onRoomMode = (mode) => setRoomMode(mode);
 
+    // Active roster update listener
+    const onRoomUsers = (usersList) => {
+      setActiveUsers(usersList);
+    };
+
     const emitJoinRoom = () => {
+      // Announce identity through newly added join-room channel
+      socket.emit("join-room", {
+        roomId: currentUser.roomId,
+        username: currentUser.name
+      });
+
+      // Backward compatibility emission
       socket.emit("userJoined", {
         name: currentUser.name,
         userId: currentUser.userId,
@@ -152,6 +179,7 @@ const RoomPage = ({ socket, user }) => {
     socket.on("elementDeleted", onElementDeleted);
     socket.on("elementRestored", onElementRestored);
     socket.on("roomMode", onRoomMode);
+    socket.on("room-users", onRoomUsers);
 
     if (socket.connected) emitJoinRoom();
     else socket.on("connect", emitJoinRoom);
@@ -165,6 +193,7 @@ const RoomPage = ({ socket, user }) => {
       socket.off("elementDeleted", onElementDeleted);
       socket.off("elementRestored", onElementRestored);
       socket.off("roomMode", onRoomMode);
+      socket.off("room-users", onRoomUsers);
     };
   }, [socket, currentUser, applyCanvasClear, forceCanvasRedraw]);
 
@@ -230,6 +259,14 @@ const RoomPage = ({ socket, user }) => {
     if (!socket || !currentUser) return;
     const newMode = roomMode === "COLLABORATION" ? "PRESENTATION" : "COLLABORATION";
     socket.emit("roomModeChange", { roomId: currentUser.roomId, mode: newMode });
+  };
+
+  const handleLeaveWhiteboard = () => {
+    if (socket) {
+      socket.emit("leave-room");
+      socket.disconnect();
+    }
+    navigate("/");
   };
 
   const handleAiAction = async (mode) => {
@@ -385,7 +422,7 @@ const RoomPage = ({ socket, user }) => {
               fontFamily: "'Inter', sans-serif"
             }}
           >
-            ✨ SyncBoard
+             SyncBoard
           </span>
           <span
             style={{
@@ -678,6 +715,25 @@ const RoomPage = ({ socket, user }) => {
             >
               Export
             </button>
+
+            <button
+              type="button"
+              onClick={handleLeaveWhiteboard}
+              style={{
+                padding: '5px 6px',
+                borderRadius: '6px',
+                border: '1px solid #ffe3e3',
+                background: '#fff5f5',
+                color: '#e03131',
+                cursor: 'pointer',
+                fontSize: '11px',
+                fontWeight: '600',
+                textAlign: 'center',
+                transition: 'all 0.1s ease'
+              }}
+            >
+              Leave Board
+            </button>
           </div>
 
           <div style={{ width: '100%', height: '1px', backgroundColor: '#e9ecef', margin: '1px 0' }} />
@@ -726,11 +782,78 @@ const RoomPage = ({ socket, user }) => {
         </div>
       )}
 
+      {/* Roster sidebar panel display */}
+      <div
+        className="small-scrollbar"
+        style={{
+          position: 'absolute',
+          right: '20px',
+          top: '80px',
+          width: '220px',
+          maxHeight: '260px',
+          background: '#ffffff',
+          borderRadius: '12px',
+          border: '1px solid #dee2e6',
+          boxShadow: '0 8px 24px rgba(0,0,0,0.05)',
+          padding: '12px',
+          zIndex: 1000,
+          display: 'flex',
+          flexDirection: 'column',
+          overflowY: 'auto'
+        }}
+      >
+        <span
+          style={{
+            fontSize: '9px',
+            fontWeight: '700',
+            color: '#adb5bd',
+            textTransform: 'uppercase',
+            letterSpacing: '0.5px',
+            marginBottom: '8px',
+            display: 'block'
+          }}
+        >
+          🟢 Online Users ({activeUsers.length})
+        </span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          {activeUsers.map((username, index) => (
+            <div
+              key={index}
+              style={{
+                fontSize: '12px',
+                fontWeight: '500',
+                color: '#495057',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis'
+              }}
+              title={username}
+            >
+              <div
+                style={{
+                  width: '6px',
+                  height: '6px',
+                  borderRadius: '50%',
+                  backgroundColor: '#40c057',
+                  flexShrink: 0
+                }}
+              />
+              <span>
+                {username} {username === currentUser.name && "(You)"}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
       {aiOutput && (
         <div
           style={{
             position: 'absolute',
-            right: '120px',
+            right: '260px', // Adjusted position from '120px' to prevent collision with roster panel
             top: '80px',
             bottom: '40px',
             width: '340px',
