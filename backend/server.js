@@ -19,6 +19,33 @@ const io = new Server(server, {
   cors: { origin: "*" }
 });
 
+// Redis Adapter Configuration for Horizontal Scaling
+const { createClient } = require("redis");
+const { createAdapter } = require("@socket.io/redis-adapter");
+
+if (process.env.REDIS_URL) {
+  const pubClient = createClient({ url: process.env.REDIS_URL });
+  const subClient = pubClient.duplicate();
+
+  pubClient.on("error", (err) => {
+    console.error("❌ Redis Pub Client Error:", err.message);
+  });
+  subClient.on("error", (err) => {
+    console.error("❌ Redis Sub Client Error:", err.message);
+  });
+
+  Promise.all([pubClient.connect(), subClient.connect()])
+    .then(() => {
+      io.adapter(createAdapter(pubClient, subClient));
+      console.log("⚡ Redis adapter successfully integrated with Socket.io for horizontal scaling.");
+    })
+    .catch((err) => {
+      console.error("⚠️ Failed to connect to Redis. Falling back to the local default in-memory adapter:", err.message);
+    });
+} else {
+  console.warn("⚠️ REDIS_URL environment variable is missing. Socket.io is falling back to the default in-memory adapter.");
+}
+
 // Import the isolated AI routes and DB models
 const aiRoutes = require("./ai");
 const Room = require("./Room");
